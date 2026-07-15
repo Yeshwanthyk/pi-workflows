@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   boundedArtifactTranscript,
   createWorkflowPersistence,
+  loadWorkflowArtifacts,
   persistWorkflowJson,
 } from "./artifacts.ts";
 import {
@@ -61,10 +62,12 @@ test("live artifact persistence includes current agents and transcripts", () => 
   const directory = mkdtempSync(join(tmpdir(), "pi-workflow-artifacts-"));
   try {
     const details = workflowDetails();
+    details.result = { answer: 42 };
     details.agents.push({
       index: 1,
       label: "running-fixture",
       state: "running",
+      thinkingLevel: "medium",
       startedAt: 2,
       preview: "working",
       usage: emptyUsage(),
@@ -75,6 +78,8 @@ test("live artifact persistence includes current agents and transcripts", () => 
           name: "fixture",
           toolCallId: "call-fixture",
           text: "{}",
+          isError: true,
+          timestamp: 5,
           startedAt: 10,
           finishedAt: 25,
           durationMs: 15,
@@ -92,21 +97,55 @@ test("live artifact persistence includes current agents and transcripts", () => 
     ) as Record<string, TranscriptEntry[]>;
     assert.equal(workflow.agents.length, 1);
     assert.equal(workflow.agents[0]?.label, "running-fixture");
+    assert.equal(workflow.agents[0]?.thinkingLevel, "medium");
+    assert.equal(workflow.result, "[stored in result.json]");
     assert.equal(transcripts["1"]?.[0]?.text, "current prompt");
-    assert.deepEqual(
+
+    loadWorkflowArtifacts(directory, workflow);
+    assert.deepEqual(workflow.result, { answer: 42 });
+    assert.deepEqual(workflow.agents[0]?.transcript, [
+      { role: "user", text: "current prompt" },
       {
-        toolCallId: transcripts["1"]?.[1]?.toolCallId,
-        startedAt: transcripts["1"]?.[1]?.startedAt,
-        finishedAt: transcripts["1"]?.[1]?.finishedAt,
-        durationMs: transcripts["1"]?.[1]?.durationMs,
-      },
-      {
+        role: "tool",
+        text: "{}",
+        name: "fixture",
         toolCallId: "call-fixture",
+        isError: true,
+        timestamp: 5,
         startedAt: 10,
         finishedAt: 25,
         durationMs: 15,
       },
-    );
+    ]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact loading scopes sidecars to basenames and degrades cleanly", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-workflow-artifacts-"));
+  try {
+    const details = workflowDetails();
+    details.result = "compact";
+    details.resultArtifact = "../result.json";
+    details.transcriptArtifact = "../transcripts.json";
+    details.agents.push({
+      index: 1,
+      label: "fixture",
+      state: "done",
+      startedAt: 1,
+      preview: "",
+      usage: emptyUsage(),
+      transcript: [{ role: "assistant", text: "compact transcript" }],
+    });
+    writeFileSync(join(directory, "result.json"), JSON.stringify("hydrated"));
+    writeFileSync(join(directory, "transcripts.json"), "not json");
+
+    loadWorkflowArtifacts(directory, details);
+    assert.equal(details.result, "hydrated");
+    assert.deepEqual(details.agents[0]?.transcript, [
+      { role: "assistant", text: "compact transcript" },
+    ]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

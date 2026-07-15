@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type { TranscriptEntry, WorkflowDetails } from "./model.ts";
 import {
   safeStringify,
@@ -15,6 +16,85 @@ const TRANSCRIPT_TRUNCATION_MARKER =
 
 function textBytes(text: string) {
   return Buffer.byteLength(text, "utf8");
+}
+
+/** Normalize persisted transcript data without dropping supported metadata. */
+export function normalizeTranscript(value: unknown): TranscriptEntry[] {
+  if (!Array.isArray(value)) return [];
+  const transcript: TranscriptEntry[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Record<string, unknown>;
+    if (
+      entry.role !== "user" &&
+      entry.role !== "assistant" &&
+      entry.role !== "thinking" &&
+      entry.role !== "tool" &&
+      entry.role !== "toolResult"
+    ) {
+      continue;
+    }
+    if (typeof entry.text !== "string") continue;
+    transcript.push({
+      role: entry.role,
+      text: entry.text,
+      ...(typeof entry.name === "string" ? { name: entry.name } : {}),
+      ...(typeof entry.toolCallId === "string"
+        ? { toolCallId: entry.toolCallId }
+        : {}),
+      ...(typeof entry.isError === "boolean" ? { isError: entry.isError } : {}),
+      ...(typeof entry.timestamp === "number"
+        ? { timestamp: entry.timestamp }
+        : {}),
+      ...(typeof entry.startedAt === "number"
+        ? { startedAt: entry.startedAt }
+        : {}),
+      ...(typeof entry.finishedAt === "number"
+        ? { finishedAt: entry.finishedAt }
+        : {}),
+      ...(typeof entry.durationMs === "number"
+        ? { durationMs: entry.durationMs }
+        : {}),
+    });
+  }
+  return transcript;
+}
+
+/** Hydrate basename-scoped sidecars, retaining compact data on any failure. */
+export function loadWorkflowArtifacts(
+  runDir: string,
+  details: WorkflowDetails,
+): WorkflowDetails {
+  if (details.resultArtifact) {
+    try {
+      details.result = JSON.parse(
+        fs.readFileSync(
+          path.join(runDir, path.basename(details.resultArtifact)),
+          "utf8",
+        ),
+      );
+    } catch {
+      // Keep the compact compatibility marker from workflow.json.
+    }
+  }
+  if (details.transcriptArtifact) {
+    try {
+      const transcripts = JSON.parse(
+        fs.readFileSync(
+          path.join(runDir, path.basename(details.transcriptArtifact)),
+          "utf8",
+        ),
+      ) as Record<string, unknown>;
+      for (const agent of details.agents) {
+        agent.transcript = normalizeTranscript(
+          transcripts[String(agent.index)],
+        );
+      }
+    } catch {
+      // Missing or malformed sidecars leave compact transcript data intact.
+    }
+  }
+  return details;
 }
 
 function boundEntry(entry: TranscriptEntry, maxBytes: number) {

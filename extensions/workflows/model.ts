@@ -6,12 +6,35 @@
 import * as os from "node:os";
 import {
   truncateHead,
+  type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { formatContextUtilization } from "../shared/context-utilization.ts";
 import { safeStringify } from "./serialization.ts";
 
 export type Theme = ExtensionContext["ui"]["theme"];
+export type WorkflowThinkingLevel = ReturnType<
+  ExtensionAPI["getThinkingLevel"]
+>;
+
+export const WORKFLOW_THINKING_LEVELS: readonly WorkflowThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+export function isWorkflowThinkingLevel(
+  value: unknown,
+): value is WorkflowThinkingLevel {
+  return (
+    typeof value === "string" &&
+    (WORKFLOW_THINKING_LEVELS as readonly string[]).includes(value)
+  );
+}
 
 export const RESULT_JSON_MAX_BYTES = 24 * 1024;
 export const RESULT_JSON_MAX_LINES = 600;
@@ -66,6 +89,8 @@ export interface AgentRecord {
   phase?: string;
   state: AgentState;
   model?: string;
+  /** Resolved Pi thinking level used by this agent. */
+  thinkingLevel?: WorkflowThinkingLevel;
   /** Context capacity of the active model used for this agent. */
   contextWindow?: number;
   startedAt: number;
@@ -135,7 +160,11 @@ export function formatTokens(count: number): string {
   return `${(count / 1000000).toFixed(1)}M`;
 }
 
-export function formatUsage(usage: AgentUsage, model?: string): string {
+export function formatUsage(
+  usage: AgentUsage,
+  model?: string,
+  thinkingLevel?: WorkflowThinkingLevel,
+): string {
   const parts: string[] = [];
   if (usage.turns)
     parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
@@ -143,6 +172,7 @@ export function formatUsage(usage: AgentUsage, model?: string): string {
   if (usage.output) parts.push(`${formatTokens(usage.output)} out`);
   if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
   if (model) parts.push(model);
+  if (thinkingLevel) parts.push(`think:${thinkingLevel}`);
   return parts.join(" · ");
 }
 

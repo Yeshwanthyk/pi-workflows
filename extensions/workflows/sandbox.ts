@@ -231,7 +231,14 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
         const sendResult = (result: SandboxAgentResult) => {
           if (!activeAgentRequests.delete(id)) return;
           if (finished || !child.connected) return;
-          const normalized = toSerializable(result, {
+          const scriptResult: SandboxAgentResult = result.ok
+            ? result
+            : {
+                ok: false,
+                output: result.output,
+                ...(result.error !== undefined ? { error: result.error } : {}),
+              };
+          const normalized = toSerializable(scriptResult, {
             maxDepth: 16,
             maxNodes: 10_000,
             maxStringBytes: 128 * 1024,

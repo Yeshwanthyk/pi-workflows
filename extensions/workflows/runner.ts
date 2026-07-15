@@ -81,6 +81,10 @@ export interface AgentProgress {
   transcript: TranscriptEntry[];
 }
 
+type AgentSessionFactory = (
+  options: Parameters<typeof createAgentSession>[0],
+) => Promise<{ session: AgentSession }>;
+
 export interface RunAgentOptions {
   prompt: string;
   schema?: unknown;
@@ -96,6 +100,8 @@ export interface RunAgentOptions {
   toolCallTimeoutMs?: number;
   /** Test-only override for the first assistant response-event timeout. */
   firstResponseTimeoutMs?: number;
+  /** Test-only session factory for direct runner lifecycle coverage. */
+  createSession?: AgentSessionFactory;
 }
 
 /** Build a fresh extension runtime for each concurrent workflow child. */
@@ -386,16 +392,24 @@ export function createFirstResponseWatchdog(
 ) {
   const timeoutMs = options.timeoutMs ?? FIRST_RESPONSE_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       timer = undefined;
-      const model = options.model ? ` for ${options.model}` : "";
-      reject(
-        new Error(
-          `Agent received no assistant response event${model} within ${formatTimeout(timeoutMs)}; the provider request may be stalled. Retry the workflow.`,
-        ),
-      );
-      void onTimeout().catch(() => {});
+      timedOut = true;
+      void (async () => {
+        try {
+          await onTimeout();
+        } catch {
+          // Teardown is best-effort; the watchdog error remains authoritative.
+        }
+        const model = options.model ? ` for ${options.model}` : "";
+        reject(
+          new Error(
+            `Agent received no assistant response event${model} within ${formatTimeout(timeoutMs)}; the provider request may be stalled. Retry the workflow.`,
+          ),
+        );
+      })();
     }, timeoutMs);
   });
 
@@ -408,7 +422,8 @@ export function createFirstResponseWatchdog(
     markResponse: cancel,
     async waitFor<T>(operation: Promise<T>) {
       try {
-        return await Promise.race([operation, timeout]);
+        const result = await Promise.race([operation, timeout]);
+        return timedOut ? await timeout : result;
       } finally {
         cancel();
       }
@@ -441,7 +456,7 @@ export async function runAgent(
             }),
           ]
         : undefined;
-    ({ session } = await createAgentSession({
+    ({ session } = await (options.createSession ?? createAgentSession)({
       cwd: options.cwd,
       ...(options.model ? { model: options.model } : {}),
       ...(options.thinkingLevel
@@ -475,6 +490,11 @@ export async function runAgent(
   }
 
   const childSession = session;
+  let teardownPromise: Promise<void> | undefined;
+  const teardown = (abort = false) =>
+    (teardownPromise ??= shutdownAndDisposeChildSession(childSession, {
+      abort,
+    }));
   let usage = emptyUsage();
   let modelId = childSession.model?.id ?? options.model?.id;
   let contextWindow = childSession.model?.contextWindow;
@@ -554,10 +574,9 @@ export async function runAgent(
   });
 
   let aborted = false;
-  let abortPromise: Promise<void> | undefined;
   const onAbort = () => {
     aborted = true;
-    abortPromise ??= childSession.abort().catch(() => {});
+    void teardown(true);
   };
   if (options.signal) {
     if (options.signal.aborted) onAbort();
@@ -568,7 +587,7 @@ export async function runAgent(
   let transcript: TranscriptEntry[] = [];
   try {
     if (!aborted) {
-      const watchdog = createFirstResponseWatchdog(() => childSession.abort(), {
+      const watchdog = createFirstResponseWatchdog(() => teardown(true), {
         timeoutMs: options.firstResponseTimeoutMs,
         model: modelId,
       });
@@ -582,7 +601,6 @@ export async function runAgent(
     stopReason = stopReason ?? "error";
   } finally {
     options.signal?.removeEventListener("abort", onAbort);
-    if (abortPromise) await abortPromise;
     unsubscribe();
     unsubscribeToolTimeout?.();
     sync();
@@ -591,14 +609,13 @@ export async function runAgent(
       AGENT_OUTPUT_MAX_BYTES,
     );
     transcript = transcriptFromMessages(childSession.messages, toolTimings);
-    await shutdownAndDisposeChildSession(childSession);
+    await teardown();
   }
 
   if (aborted || stopReason === "aborted") {
     return {
       ok: false,
       output,
-      structured,
       error: "Agent was aborted",
       aborted: true,
       usage,
@@ -613,7 +630,6 @@ export async function runAgent(
     return {
       ok: false,
       output,
-      structured,
       error: errorMessage ?? "Agent failed",
       aborted: false,
       usage,

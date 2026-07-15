@@ -45,6 +45,23 @@ test("sandbox exposes only workflow capabilities and validates results", async (
   assert.deepEqual(phases, ["Gather"]);
 });
 
+test("sandbox hides structured payloads from failed agent outcomes", async () => {
+  const result = await run(`return await agent("partial");`, {
+    onAgent: async () => ({
+      ok: false,
+      output: "partial output",
+      structured: { unsafe: true },
+      error: "failed",
+    }),
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    output: "partial output",
+    error: "failed",
+  });
+});
+
 test("sandbox result serialization handles cycles and bigint", async () => {
   const result = await run(`
     const value = { count: 7n };

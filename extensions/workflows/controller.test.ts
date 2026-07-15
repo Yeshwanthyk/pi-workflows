@@ -46,6 +46,33 @@ test("RunController propagates invocation cancellation without aborting the run"
   assert.equal(await controller.settle(), true);
 });
 
+test("RunController seals commits when bounded settlement begins", async () => {
+  const controller = new RunController();
+  let value = "live";
+  assert.equal(
+    controller.commit(() => {
+      value = "updated";
+    }),
+    true,
+  );
+  void controller.schedule(() => new Promise<void>(() => {}));
+
+  const keepAlive = setInterval(() => {}, 1_000);
+  assert.equal(await controller.settle({ timeoutMs: 10 }), false);
+  clearInterval(keepAlive);
+  assert.equal(
+    controller.commit(() => {
+      value = "late";
+    }),
+    false,
+  );
+  assert.equal(value, "updated");
+  await assert.rejects(
+    controller.schedule(async () => "late task"),
+    /settling/,
+  );
+});
+
 test("RunController enforces call budget and aborts queued tasks", async () => {
   const controller = new RunController(undefined, 1);
   const blocker = controller.schedule(

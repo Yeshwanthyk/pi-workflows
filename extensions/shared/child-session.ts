@@ -87,15 +87,17 @@ interface ChildExtensionRunner {
 
 export interface DisposableChildSession {
   readonly extensionRunner: ChildExtensionRunner;
+  abort?(): Promise<unknown>;
   dispose(): void;
 }
 
 const childShutdowns = new WeakMap<object, Promise<void>>();
 
-function waitBounded(operation: Promise<unknown>, timeoutMs: number) {
+function waitUntil(operation: Promise<unknown>, deadline: number) {
+  const remainingMs = Math.max(0, deadline - Date.now());
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, timeoutMs);
+    timer = setTimeout(resolve, remainingMs);
   });
   return Promise.race([
     operation.then(
@@ -103,37 +105,46 @@ function waitBounded(operation: Promise<unknown>, timeoutMs: number) {
       () => undefined,
     ),
     timeout,
-  ])
-    .catch(() => {})
-    .finally(() => {
-      if (timer) clearTimeout(timer);
-    });
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 /**
- * Emit child session_shutdown once, then dispose once. Hook failures and a
- * bounded hook deadline never prevent disposal.
+ * Optionally abort, emit child session_shutdown, then dispose under one
+ * absolute deadline. Every caller for a session shares the same teardown.
  */
 export function shutdownAndDisposeChildSession(
   session: DisposableChildSession,
-  options: { timeoutMs?: number } = {},
+  options: { abort?: boolean; timeoutMs?: number } = {},
 ) {
   const existing = childShutdowns.get(session);
   if (existing) return existing;
 
   const shutdown = (async () => {
+    const deadline =
+      Date.now() + (options.timeoutMs ?? CHILD_SHUTDOWN_TIMEOUT_MS);
     try {
-      if (session.extensionRunner.hasHandlers("session_shutdown")) {
-        await waitBounded(
-          session.extensionRunner.emit({
-            type: "session_shutdown",
-            reason: "quit",
-          }),
-          options.timeoutMs ?? CHILD_SHUTDOWN_TIMEOUT_MS,
-        );
+      try {
+        if (options.abort && session.abort) {
+          await waitUntil(session.abort(), deadline);
+        }
+      } catch {
+        // Abort is best-effort; shutdown hooks still receive their chance.
       }
-    } catch {
-      // Extension runner inspection/emission is best-effort during teardown.
+      try {
+        if (session.extensionRunner.hasHandlers("session_shutdown")) {
+          await waitUntil(
+            session.extensionRunner.emit({
+              type: "session_shutdown",
+              reason: "quit",
+            }),
+            deadline,
+          );
+        }
+      } catch {
+        // Extension runner inspection/emission is best-effort during teardown.
+      }
     } finally {
       try {
         session.dispose();

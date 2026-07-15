@@ -253,18 +253,59 @@ test("shutdown helper balances hooks and disposal despite errors", async () => {
   assert.equal(disposals, 1);
 });
 
-test("shutdown helper bounds a stuck hook before disposal", async () => {
-  let disposals = 0;
+test("shutdown helper shares abort, hook, and disposal under one deadline", async () => {
+  const events: string[] = [];
+  let releaseAbort: (() => void) | undefined;
+  const abort = new Promise<void>((resolve) => {
+    releaseAbort = resolve;
+  });
   const session: DisposableChildSession = {
+    abort: async () => {
+      events.push("abort");
+      await abort;
+      events.push("aborted");
+    },
     extensionRunner: {
       hasHandlers: () => true,
-      emit: () => new Promise(() => {}),
+      async emit() {
+        events.push("hook");
+      },
     },
     dispose() {
-      disposals++;
+      events.push("dispose");
     },
   };
 
-  await shutdownAndDisposeChildSession(session, { timeoutMs: 10 });
-  assert.equal(disposals, 1);
+  const first = shutdownAndDisposeChildSession(session, {
+    abort: true,
+    timeoutMs: 100,
+  });
+  const second = shutdownAndDisposeChildSession(session, { abort: true });
+  assert.equal(first, second);
+  assert.deepEqual(events, ["abort"]);
+  releaseAbort?.();
+  await Promise.all([first, second]);
+  assert.deepEqual(events, ["abort", "aborted", "hook", "dispose"]);
+});
+
+test("shutdown helper disposes when abort exhausts the shared deadline", async () => {
+  const events: string[] = [];
+  const session: DisposableChildSession = {
+    abort: () => new Promise(() => {}),
+    extensionRunner: {
+      hasHandlers: () => true,
+      emit: async () => {
+        events.push("hook");
+      },
+    },
+    dispose() {
+      events.push("dispose");
+    },
+  };
+
+  await shutdownAndDisposeChildSession(session, {
+    abort: true,
+    timeoutMs: 10,
+  });
+  assert.deepEqual(events, ["hook", "dispose"]);
 });

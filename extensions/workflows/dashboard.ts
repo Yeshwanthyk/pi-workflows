@@ -26,12 +26,14 @@ import {
   wrapTextWithAnsi,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { loadWorkflowArtifacts, normalizeTranscript } from "./artifacts.ts";
 import {
   agentContext,
   countStates,
   formatElapsed,
   formatUsage,
   aggregateUsage,
+  isWorkflowThinkingLevel,
   phaseGroups,
   resultJson,
   shortenHome,
@@ -65,34 +67,6 @@ function runsDir(): string {
   return path.join(getAgentDir(), "workflows");
 }
 
-function normalizeTranscript(value: unknown): TranscriptEntry[] {
-  if (!Array.isArray(value)) return [];
-  const transcript: TranscriptEntry[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") continue;
-    const entry = item as Record<string, unknown>;
-    if (
-      entry.role !== "user" &&
-      entry.role !== "assistant" &&
-      entry.role !== "thinking" &&
-      entry.role !== "tool" &&
-      entry.role !== "toolResult"
-    ) {
-      continue;
-    }
-    if (typeof entry.text !== "string") continue;
-    transcript.push({
-      role: entry.role,
-      text: entry.text,
-      name: typeof entry.name === "string" ? entry.name : undefined,
-      isError: entry.isError === true,
-      timestamp:
-        typeof entry.timestamp === "number" ? entry.timestamp : undefined,
-    });
-  }
-  return transcript;
-}
-
 /** Leniently normalize a workflow.json (including runs from older tooling). */
 function normalizeDetails(
   runId: string,
@@ -121,6 +95,9 @@ function normalizeDetails(
       phase: typeof a.phase === "string" ? a.phase : undefined,
       state,
       model: typeof a.model === "string" ? a.model : undefined,
+      thinkingLevel: isWorkflowThinkingLevel(a.thinkingLevel)
+        ? a.thinkingLevel
+        : undefined,
       contextWindow:
         typeof a.contextWindow === "number" &&
         Number.isFinite(a.contextWindow) &&
@@ -253,36 +230,7 @@ export function loadRunEntries(
         details &&
         (details.sessionId === sessionId || referencedRunIds.has(runId))
       ) {
-        const runDir = path.join(runsDir(), runId);
-        if (details.resultArtifact) {
-          try {
-            details.result = JSON.parse(
-              fs.readFileSync(
-                path.join(runDir, path.basename(details.resultArtifact)),
-                "utf8",
-              ),
-            );
-          } catch {
-            // Keep the compact compatibility marker from workflow.json.
-          }
-        }
-        if (details.transcriptArtifact) {
-          try {
-            const transcripts = JSON.parse(
-              fs.readFileSync(
-                path.join(runDir, path.basename(details.transcriptArtifact)),
-                "utf8",
-              ),
-            ) as Record<string, unknown>;
-            for (const agent of details.agents) {
-              agent.transcript = normalizeTranscript(
-                transcripts[String(agent.index)],
-              );
-            }
-          } catch {
-            // Older or partially written artifacts simply lack transcripts.
-          }
-        }
+        loadWorkflowArtifacts(path.join(runsDir(), runId), details);
         if (details.status === "running") {
           details.status = "aborted";
           details.finishedAt = details.finishedAt ?? Date.now();
@@ -334,6 +282,7 @@ function buildReport(details: WorkflowDetails): string {
             : "running";
       const stats = [
         agent.model,
+        agent.thinkingLevel ? `think:${agent.thinkingLevel}` : undefined,
         agentContext(agent),
         formatElapsed(agent.startedAt, agent.finishedAt),
       ]
@@ -844,7 +793,11 @@ export class WorkflowDashboard {
           selected && this.detailFocus === "agents"
             ? theme.fg("accent", "❯")
             : " ";
-        const stats = [agent.model, agentContext(agent)]
+        const stats = [
+          agent.model,
+          agent.thinkingLevel ? `think:${agent.thinkingLevel}` : undefined,
+          agentContext(agent),
+        ]
           .filter(Boolean)
           .join(" · ");
         const label =

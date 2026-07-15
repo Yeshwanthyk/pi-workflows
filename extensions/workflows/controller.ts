@@ -157,6 +157,13 @@ export class RunController {
     this.semaphore.clear();
   }
 
+  /** Apply a live-run update only while terminalization has not begun. */
+  commit(update: () => void) {
+    if (this.sealed) return false;
+    update();
+    return true;
+  }
+
   /** Seal the task registry and wait a bounded time for every task to settle. */
   async settle(options: { abort?: boolean; timeoutMs?: number } = {}) {
     this.sealed = true;

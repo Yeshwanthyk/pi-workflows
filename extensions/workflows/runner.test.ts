@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type {
-  AgentSession,
-  AgentSessionEventListener,
-  ToolDefinition,
+import {
+  AuthStorage,
+  DefaultResourceLoader,
+  ModelRegistry,
+  SettingsManager,
+  type AgentSession,
+  type AgentSessionEventListener,
+  type ExtensionContext,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   createFirstResponseWatchdog,
   guardWorkflowChildTools,
   recordToolExecutionTiming,
+  runAgent,
   transcriptFromMessages,
   type ToolExecutionTiming,
 } from "./runner.ts";
@@ -28,6 +34,75 @@ const zeroUsage = {
     total: 0,
   },
 };
+
+async function runAfterStructuredOutput(mode: "error" | "abort") {
+  const abortController = new AbortController();
+  const settingsManager = SettingsManager.inMemory();
+  const loader = new DefaultResourceLoader({
+    cwd: process.cwd(),
+    agentDir: process.cwd(),
+    settingsManager,
+  });
+  const modelRegistry = ModelRegistry.inMemory(AuthStorage.inMemory());
+  let releasePrompt: (() => void) | undefined;
+
+  return runAgent({
+    prompt: "return structured output",
+    schema: {
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"],
+      additionalProperties: false,
+    },
+    cwd: process.cwd(),
+    loader,
+    settingsManager,
+    modelRegistry,
+    signal: abortController.signal,
+    createSession: async (creationOptions) => {
+      const tools = new Map(
+        (creationOptions?.customTools ?? []).map((tool) => [tool.name, tool]),
+      );
+      const messages: AgentSession["messages"] = [];
+      const session = {
+        messages,
+        model: undefined,
+        bindExtensions: async () => {},
+        getAllTools: () => [...tools.keys()].map((name) => ({ name })),
+        getToolDefinition: (name: string) => tools.get(name),
+        subscribe: (_listener: AgentSessionEventListener) => () => {},
+        getContextUsage: () => undefined,
+        prompt: async () => {
+          const structuredTool = tools.get("structured_output");
+          if (!structuredTool)
+            throw new Error("missing structured_output tool");
+          await structuredTool.execute(
+            "structured-call",
+            { value: "partial" },
+            undefined,
+            undefined,
+            {} as ExtensionContext,
+          );
+          if (mode === "error") throw new Error("provider failed");
+          const pending = new Promise<void>((resolve) => {
+            releasePrompt = resolve;
+          });
+          abortController.abort();
+          await pending;
+        },
+        abort: async () => {
+          releasePrompt?.();
+        },
+        extensionRunner: {
+          hasHandlers: () => false,
+          emit: async () => {},
+        },
+        dispose: () => {},
+      } as unknown as AgentSession;
+      return { session };
+    },
+  });
+}
 
 function parallelToolMessages(): AgentSession["messages"] {
   return [
@@ -180,20 +255,57 @@ test("in-flight aborted tool calls retain start timing without completion", () =
   );
 });
 
-test("first-response watchdog aborts a silent provider request", async () => {
-  let aborted = false;
+test("runAgent omits structured output after a provider error", async () => {
+  const outcome = await runAfterStructuredOutput("error");
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error, "provider failed");
+  assert.equal("structured" in outcome, false);
+});
+
+test("runAgent omits structured output after an abort", async () => {
+  const outcome = await runAfterStructuredOutput("abort");
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.aborted, true);
+  assert.equal("structured" in outcome, false);
+});
+
+test("first-response watchdog awaits retained teardown before rejecting", async () => {
+  let releaseTeardown: (() => void) | undefined;
+  const teardown = new Promise<void>((resolve) => {
+    releaseTeardown = resolve;
+  });
+  let releaseOperation: (() => void) | undefined;
+  const operation = new Promise<void>((resolve) => {
+    releaseOperation = resolve;
+  });
+  let teardownStarted = false;
   const watchdog = createFirstResponseWatchdog(
     async () => {
-      aborted = true;
+      teardownStarted = true;
+      await teardown;
     },
     { timeoutMs: 10, model: "fixture-model" },
   );
 
+  const waiting = watchdog.waitFor(operation);
+  let rejected = false;
+  void waiting.catch(() => {
+    rejected = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(teardownStarted, true);
+  assert.equal(rejected, false);
+  releaseOperation?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(rejected, false);
+
+  releaseTeardown?.();
   await assert.rejects(
-    watchdog.waitFor(new Promise<never>(() => {})),
+    waiting,
     /no assistant response event for fixture-model within 10 ms.*stalled/i,
   );
-  assert.equal(aborted, true);
 });
 
 test("first assistant response disarms the watchdog without limiting the run", async () => {

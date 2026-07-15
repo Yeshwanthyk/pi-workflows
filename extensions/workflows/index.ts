@@ -34,7 +34,11 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { formatActivityStatus } from "../shared/activity-status.ts";
-import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
+import {
+  createWorkflowPersistence,
+  loadWorkflowArtifacts,
+  persistWorkflowJson,
+} from "./artifacts.ts";
 import { RunController } from "./controller.ts";
 import { sessionWorkflowRunIds, showWorkflowDashboard } from "./dashboard.ts";
 import {
@@ -49,12 +53,14 @@ import {
   emptyUsage,
   formatElapsed,
   formatUsage,
+  isWorkflowThinkingLevel,
   phaseGroups,
   resultJson,
   stateSquare,
   statusColor,
   statusWord,
   SQUARE,
+  WORKFLOW_THINKING_LEVELS,
   type AgentRecord,
   type WorkflowDetails,
 } from "./model.ts";
@@ -79,16 +85,6 @@ import { safeStringify, writeFileAtomic } from "./serialization.ts";
 
 const PREVIEW_LENGTH = 200;
 const EMIT_INTERVAL_MS = 120;
-
-const THINKING_LEVELS = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
 
 /** What `agent()` resolves to inside the script. */
 interface ScriptAgentResult {
@@ -234,7 +230,10 @@ function runDetailText(
     const parsed = JSON.parse(
       fs.readFileSync(path.join(runDir, "workflow.json"), "utf8"),
     ) as WorkflowDetails;
-    return buildWorkflowResultMessage(parsed, runDir);
+    return buildWorkflowResultMessage(
+      loadWorkflowArtifacts(runDir, parsed),
+      runDir,
+    );
   } catch {
     return `Run ${run.runId} — ${run.status}`;
   }
@@ -496,10 +495,12 @@ export default function workflows(pi: ExtensionAPI) {
         emit(false);
 
         const fail = (error: string): ScriptAgentResult => {
-          record.state = "error";
-          record.error = error;
-          record.finishedAt = Date.now();
-          emit();
+          controller.commit(() => {
+            record.state = "error";
+            record.error = error;
+            record.finishedAt = Date.now();
+            emit();
+          });
           return { ok: false, output: "", error };
         };
 
@@ -551,21 +552,23 @@ export default function workflows(pi: ExtensionAPI) {
               }
               model = resolved;
             }
-            record.model = model?.id;
-            record.contextWindow = model?.contextWindow;
-            emit();
-
             // Effort → thinking level; default inherits the parent session.
             let thinkingLevel: ThinkingLevel = pi.getThinkingLevel();
             if (opts.effort !== undefined) {
               const effort = String(opts.effort);
-              if (!(THINKING_LEVELS as readonly string[]).includes(effort)) {
+              if (!isWorkflowThinkingLevel(effort)) {
                 return fail(
-                  `agent "${label}": invalid effort "${effort}" (use ${THINKING_LEVELS.join("|")})`,
+                  `agent "${label}": invalid effort "${effort}" (use ${WORKFLOW_THINKING_LEVELS.join("|")})`,
                 );
               }
-              thinkingLevel = effort as ThinkingLevel;
+              thinkingLevel = effort;
             }
+            controller.commit(() => {
+              record.model = model?.id;
+              record.thinkingLevel = thinkingLevel;
+              record.contextWindow = model?.contextWindow;
+              emit();
+            });
 
             const resources = await getResources(opts.schema !== undefined);
             const outcome = await runAgent({
@@ -579,33 +582,37 @@ export default function workflows(pi: ExtensionAPI) {
               modelRegistry: ctx.modelRegistry,
               signal: runSignal,
               onProgress: (progress) => {
-                record.preview = progress.preview.slice(0, PREVIEW_LENGTH);
-                record.usage = progress.usage;
-                record.model = progress.model ?? record.model;
-                record.contextWindow =
-                  progress.contextWindow ?? record.contextWindow;
-                record.transcript = progress.transcript;
-                emit();
+                controller.commit(() => {
+                  record.preview = progress.preview.slice(0, PREVIEW_LENGTH);
+                  record.usage = progress.usage;
+                  record.model = progress.model ?? record.model;
+                  record.contextWindow =
+                    progress.contextWindow ?? record.contextWindow;
+                  record.transcript = progress.transcript;
+                  emit();
+                });
               },
             });
 
-            record.usage = outcome.usage;
-            record.model = outcome.model ?? record.model;
-            record.contextWindow =
-              outcome.contextWindow ?? record.contextWindow;
-            record.transcript = outcome.transcript;
-            record.preview = (outcome.output || record.preview).slice(
-              0,
-              PREVIEW_LENGTH,
-            );
-            record.finishedAt = Date.now();
-            record.state = outcome.ok ? "done" : "error";
-            if (outcome.ok) {
-              delete record.error;
-            } else {
-              record.error = outcome.error ?? "Agent failed";
-            }
-            emit();
+            controller.commit(() => {
+              record.usage = outcome.usage;
+              record.model = outcome.model ?? record.model;
+              record.contextWindow =
+                outcome.contextWindow ?? record.contextWindow;
+              record.transcript = outcome.transcript;
+              record.preview = (outcome.output || record.preview).slice(
+                0,
+                PREVIEW_LENGTH,
+              );
+              record.finishedAt = Date.now();
+              record.state = outcome.ok ? "done" : "error";
+              if (outcome.ok) {
+                delete record.error;
+              } else {
+                record.error = outcome.error ?? "Agent failed";
+              }
+              emit();
+            });
 
             return {
               ok: outcome.ok,
@@ -820,7 +827,11 @@ export default function workflows(pi: ExtensionAPI) {
           new Text(theme.fg("muted", `─── ${group.title} ───`), 0, 0),
         );
         for (const agent of group.agents) {
-          const usage = formatUsage(agent.usage, agent.model);
+          const usage = formatUsage(
+            agent.usage,
+            agent.model,
+            agent.thinkingLevel,
+          );
           const context = agentContext(agent);
           let line = `${stateSquare(agent.state, theme)} ${theme.fg("accent", agent.label)} ${theme.fg(
             "dim",
