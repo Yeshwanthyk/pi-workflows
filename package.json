@@ -1,0 +1,40 @@
+{
+  "name": "pi-workflows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "keywords": [
+    "pi-package"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types extensions/workflows/artifacts.test.ts extensions/workflows/controller.test.ts extensions/workflows/meta.test.ts extensions/workflows/runner.test.ts extensions/workflows/sandbox.test.ts extensions/workflows/serialization.test.ts extensions/shared/child-session.test.ts extensions/shared/context-utilization.test.ts extensions/shared/tool-call-timeout.test.ts",
+    "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"*.{json,md}\"",
+    "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"*.{json,md}\""
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/workflows/index.ts"
+    ]
+  },
+  "dependencies": {
+    "acorn": "^8.17.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.7",
+    "@earendil-works/pi-tui": "^0.80.7",
+    "@types/node": "^24.0.0",
+    "prettier": "^3.6.0",
+    "typebox": "^1.0.0",
+    "typescript": "^5.9.0"
+  }
+}
