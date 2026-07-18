@@ -55,7 +55,11 @@ export function buildWorkflowAgentPrompt(prompt: string) {
 
 /** Instructs structured workflow children to terminate with exactly one structured_output call. */
 export const STRUCTURED_OUTPUT_SYSTEM_INSTRUCTION =
-  "When your task is complete, call the `structured_output` tool exactly once as your final action, with fields matching the required schema. Do not write any other text after it.";
+  "When your task is complete, do not answer with JSON or prose. Call the `structured_output` tool exactly once as your final action, with fields matching the required schema. Do not write any other text after it.";
+
+/** One bounded recovery turn when a structured child settles without using its final tool. */
+export const STRUCTURED_OUTPUT_RECOVERY_PROMPT =
+  "Your previous response did not call the required `structured_output` tool. Do not continue researching or explain. Call `structured_output` now with your completed result, matching its schema exactly.";
 
 /** Describes the terminating structured_output tool and its final-action contract. */
 export const STRUCTURED_OUTPUT_TOOL_DESCRIPTION =

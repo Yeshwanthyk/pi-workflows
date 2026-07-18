@@ -104,6 +104,94 @@ async function runAfterStructuredOutput(mode: "error" | "abort") {
   });
 }
 
+async function runMissingStructuredOutputRecovery(recover = true) {
+  const settingsManager = SettingsManager.inMemory();
+  const loader = new DefaultResourceLoader({
+    cwd: process.cwd(),
+    agentDir: process.cwd(),
+    settingsManager,
+  });
+  const modelRegistry = ModelRegistry.inMemory(AuthStorage.inMemory());
+  const prompts: string[] = [];
+
+  const outcome = await runAgent({
+    prompt: "return structured output",
+    schema: {
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"],
+      additionalProperties: false,
+    },
+    cwd: process.cwd(),
+    loader,
+    settingsManager,
+    modelRegistry,
+    createSession: async (creationOptions) => {
+      const tools = new Map(
+        (creationOptions?.customTools ?? []).map((tool) => [tool.name, tool]),
+      );
+      const messages: AgentSession["messages"] = [];
+      const session = {
+        messages,
+        model: undefined,
+        bindExtensions: async () => {},
+        getAllTools: () => [...tools.keys()].map((name) => ({ name })),
+        getToolDefinition: (name: string) => tools.get(name),
+        subscribe: (_listener: AgentSessionEventListener) => () => {},
+        getContextUsage: () => undefined,
+        prompt: async (prompt: string) => {
+          prompts.push(prompt);
+          if (prompts.length === 1) {
+            messages.push({
+              role: "assistant",
+              content: [{ type: "text", text: '{"value":"plain-json"}' }],
+              api: "openai-responses",
+              provider: "fixture",
+              model: "fixture",
+              usage: zeroUsage,
+              stopReason: "stop",
+              timestamp: Date.now(),
+            });
+            return;
+          }
+          if (!recover) {
+            messages.push({
+              role: "assistant",
+              content: [{ type: "text", text: "still plain text" }],
+              api: "openai-responses",
+              provider: "fixture",
+              model: "fixture",
+              usage: zeroUsage,
+              stopReason: "stop",
+              timestamp: Date.now(),
+            });
+            return;
+          }
+          const structuredTool = tools.get("structured_output");
+          if (!structuredTool)
+            throw new Error("missing structured_output tool");
+          await structuredTool.execute(
+            "structured-call",
+            { value: "recovered" },
+            undefined,
+            undefined,
+            {} as ExtensionContext,
+          );
+        },
+        abort: async () => {},
+        extensionRunner: {
+          hasHandlers: () => false,
+          emit: async () => {},
+        },
+        dispose: () => {},
+      } as unknown as AgentSession;
+      return { session };
+    },
+  });
+
+  return { outcome, prompts };
+}
+
 function parallelToolMessages(): AgentSession["messages"] {
   return [
     { role: "user", content: "run both", timestamp: 900 },
@@ -253,6 +341,23 @@ test("in-flight aborted tool calls retain start timing without completion", () =
     transcript.some((entry) => entry.role === "toolResult"),
     false,
   );
+});
+
+test("runAgent recovers once when the model returns plain JSON instead of structured output", async () => {
+  const { outcome, prompts } = await runMissingStructuredOutputRecovery();
+
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(outcome.structured, { value: "recovered" });
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /call the required `structured_output` tool/i);
+});
+
+test("runAgent bounds missing structured output recovery to one turn", async () => {
+  const { outcome, prompts } = await runMissingStructuredOutputRecovery(false);
+
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error ?? "", /without calling structured_output/i);
+  assert.equal(prompts.length, 2);
 });
 
 test("runAgent omits structured output after a provider error", async () => {

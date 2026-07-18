@@ -34,6 +34,7 @@ import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
 import { emptyUsage, type AgentUsage, type TranscriptEntry } from "./model.ts";
 import {
   buildWorkflowAgentPrompt,
+  STRUCTURED_OUTPUT_RECOVERY_PROMPT,
   STRUCTURED_OUTPUT_SYSTEM_INSTRUCTION,
   STRUCTURED_OUTPUT_TOOL_DESCRIPTION,
 } from "./prompt.ts";
@@ -583,18 +584,33 @@ export async function runAgent(
     else options.signal.addEventListener("abort", onAbort, { once: true });
   }
 
+  const promptWithWatchdog = async (prompt: string) => {
+    const watchdog = createFirstResponseWatchdog(() => teardown(true), {
+      timeoutMs: options.firstResponseTimeoutMs,
+      model: modelId,
+    });
+    markFirstResponse = watchdog.markResponse;
+    await watchdog.waitFor(childSession.prompt(prompt));
+  };
+
   let output = "";
   let transcript: TranscriptEntry[] = [];
   try {
     if (!aborted) {
-      const watchdog = createFirstResponseWatchdog(() => teardown(true), {
-        timeoutMs: options.firstResponseTimeoutMs,
-        model: modelId,
-      });
-      markFirstResponse = watchdog.markResponse;
-      await watchdog.waitFor(
-        childSession.prompt(buildWorkflowAgentPrompt(options.prompt)),
-      );
+      await promptWithWatchdog(buildWorkflowAgentPrompt(options.prompt));
+      sync();
+      // A fresh prompt gives AgentSession its normal pre-prompt compaction check
+      // and one bounded chance to repair a model that returned prose/JSON or
+      // otherwise settled without invoking the terminating result tool.
+      if (
+        options.schema !== undefined &&
+        structured === undefined &&
+        stopReason !== "error" &&
+        stopReason !== "aborted" &&
+        errorMessage === undefined
+      ) {
+        await promptWithWatchdog(STRUCTURED_OUTPUT_RECOVERY_PROMPT);
+      }
     }
   } catch (error) {
     errorMessage = errorMessage ?? errorText(error);
