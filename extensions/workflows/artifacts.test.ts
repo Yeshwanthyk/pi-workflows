@@ -62,12 +62,28 @@ test("live artifact persistence includes current agents and transcripts", () => 
   const directory = mkdtempSync(join(tmpdir(), "pi-workflow-artifacts-"));
   try {
     const details = workflowDetails();
+    details.limits = { concurrency: 4, hardCapacity: 10 };
+    details.budget = {
+      turns: 1,
+      outputTokens: 7,
+      costUsd: 0,
+      outputComplete: false,
+      costComplete: true,
+    };
+    details.termination = {
+      code: "output_tokens",
+      message: "usage unavailable",
+      outcome: "failed",
+      at: 9,
+      budget: { ...details.budget },
+    };
     details.result = { answer: 42 };
     details.agents.push({
       index: 1,
       label: "running-fixture",
       state: "running",
       thinkingLevel: "medium",
+      queuedAt: 2,
       startedAt: 2,
       preview: "working",
       usage: emptyUsage(),
@@ -98,6 +114,9 @@ test("live artifact persistence includes current agents and transcripts", () => 
     assert.equal(workflow.agents.length, 1);
     assert.equal(workflow.agents[0]?.label, "running-fixture");
     assert.equal(workflow.agents[0]?.thinkingLevel, "medium");
+    assert.equal(workflow.limits?.hardCapacity, 10);
+    assert.deepEqual(workflow.budget, details.budget);
+    assert.deepEqual(workflow.termination, details.termination);
     assert.equal(workflow.result, "[stored in result.json]");
     assert.equal(transcripts["1"]?.[0]?.text, "current prompt");
 
@@ -133,6 +152,7 @@ test("artifact loading scopes sidecars to basenames and degrades cleanly", () =>
       index: 1,
       label: "fixture",
       state: "done",
+      queuedAt: 1,
       startedAt: 1,
       preview: "",
       usage: emptyUsage(),

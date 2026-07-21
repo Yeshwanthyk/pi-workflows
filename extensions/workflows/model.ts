@@ -10,6 +10,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { formatContextUtilization } from "../shared/context-utilization.ts";
+import type { EffectiveWorkflowLimits } from "./limits.ts";
 import { safeStringify } from "./serialization.ts";
 
 export type Theme = ExtensionContext["ui"]["theme"];
@@ -45,9 +46,42 @@ export interface AgentUsage {
   cacheRead: number;
   cacheWrite: number;
   cost: number;
+  /** False when at least one finalized assistant message omitted finite output. */
+  outputComplete?: boolean;
+  /** False when at least one finalized assistant message omitted finite cost. */
+  costComplete?: boolean;
   /** Latest compaction-aware conversation occupancy, not cumulative billing. */
   contextTokens?: number;
   turns: number;
+}
+
+export interface WorkflowBudgetTelemetry {
+  turns: number;
+  outputTokens: number;
+  costUsd: number;
+  outputComplete: boolean;
+  costComplete: boolean;
+}
+
+export type WorkflowTerminationCode =
+  | "parent_cancelled"
+  | "session_cancelled"
+  | "workflow_wall"
+  | "workflow_idle"
+  | "turns"
+  | "output_tokens"
+  | "cost_usd"
+  | "script_failure"
+  | "shutdown_timeout"
+  | "manual_abort";
+
+export interface WorkflowTerminationRecord {
+  readonly code: WorkflowTerminationCode;
+  readonly message: string;
+  readonly outcome: "failed" | "aborted";
+  readonly at: number;
+  /** Immutable accounting state when the first termination latched. */
+  readonly budget: Readonly<WorkflowBudgetTelemetry>;
 }
 
 export function emptyUsage(): AgentUsage {
@@ -57,11 +91,13 @@ export function emptyUsage(): AgentUsage {
     cacheRead: 0,
     cacheWrite: 0,
     cost: 0,
+    outputComplete: true,
+    costComplete: true,
     turns: 0,
   };
 }
 
-export type AgentState = "running" | "done" | "error";
+export type AgentState = "queued" | "running" | "done" | "error";
 export type WorkflowStatus = "running" | "completed" | "failed" | "aborted";
 
 export type TranscriptRole =
@@ -93,7 +129,9 @@ export interface AgentRecord {
   thinkingLevel?: WorkflowThinkingLevel;
   /** Context capacity of the active model used for this agent. */
   contextWindow?: number;
-  startedAt: number;
+  queuedAt: number;
+  /** Set only after per-run and process-global capacity are acquired. */
+  startedAt?: number;
   finishedAt?: number;
   error?: string;
   preview: string;
@@ -111,6 +149,12 @@ export interface WorkflowDetails {
   background: boolean;
   status: WorkflowStatus;
   startedAt: number;
+  /** Resolved once at creation and used by both parent and sandbox runtime. */
+  limits?: EffectiveWorkflowLimits;
+  /** Controller-owned authoritative totals, independent of agent projections. */
+  budget?: WorkflowBudgetTelemetry;
+  /** Typed first-reason-wins terminal record. */
+  termination?: WorkflowTerminationRecord;
   finishedAt?: number;
   phases: { title: string; detail?: string }[];
   currentPhase?: string;
@@ -184,7 +228,11 @@ export function agentContext(agent: AgentRecord): string {
   });
 }
 
-export function formatElapsed(startedAt: number, finishedAt?: number): string {
+export function formatElapsed(
+  startedAt: number | undefined,
+  finishedAt?: number,
+): string {
+  if (startedAt === undefined) return "queued";
   const totalSeconds = Math.max(
     0,
     Math.round(((finishedAt ?? Date.now()) - startedAt) / 1000),
@@ -196,15 +244,116 @@ export function formatElapsed(startedAt: number, finishedAt?: number): string {
     : `${seconds}s`;
 }
 
+function finiteNonNegative(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
+function isFiniteNonNegative(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function normalizeCompletenessFlag(value: unknown): boolean {
+  return value === undefined || value === true;
+}
+
+/** Strictly normalize untrusted historical usage before rendering/aggregation. */
+export function normalizeAgentUsage(value: unknown): AgentUsage {
+  const record =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const contextTokens = finiteNonNegative(record.contextTokens);
+  const outputKnown = isFiniteNonNegative(record.output);
+  const costKnown = isFiniteNonNegative(record.cost);
+  return {
+    input: finiteNonNegative(record.input),
+    output: finiteNonNegative(record.output),
+    cacheRead: finiteNonNegative(record.cacheRead),
+    cacheWrite: finiteNonNegative(record.cacheWrite),
+    cost: finiteNonNegative(record.cost),
+    outputComplete:
+      outputKnown && normalizeCompletenessFlag(record.outputComplete),
+    costComplete: costKnown && normalizeCompletenessFlag(record.costComplete),
+    ...(contextTokens > 0 ? { contextTokens } : {}),
+    turns: finiteNonNegative(record.turns),
+  };
+}
+
+export function normalizeBudgetTelemetry(
+  value: unknown,
+): WorkflowBudgetTelemetry | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const outputKnown = isFiniteNonNegative(record.outputTokens);
+  const costKnown = isFiniteNonNegative(record.costUsd);
+  return {
+    turns: finiteNonNegative(record.turns),
+    outputTokens: finiteNonNegative(record.outputTokens),
+    costUsd: finiteNonNegative(record.costUsd),
+    outputComplete:
+      outputKnown && normalizeCompletenessFlag(record.outputComplete),
+    costComplete: costKnown && normalizeCompletenessFlag(record.costComplete),
+  };
+}
+
+export function normalizeTerminationRecord(
+  value: unknown,
+): WorkflowTerminationRecord | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const codes: readonly WorkflowTerminationCode[] = [
+    "parent_cancelled",
+    "session_cancelled",
+    "workflow_wall",
+    "workflow_idle",
+    "turns",
+    "output_tokens",
+    "cost_usd",
+    "script_failure",
+    "shutdown_timeout",
+    "manual_abort",
+  ];
+  if (
+    typeof record.code !== "string" ||
+    !codes.includes(record.code as WorkflowTerminationCode) ||
+    typeof record.message !== "string" ||
+    (record.outcome !== "failed" && record.outcome !== "aborted") ||
+    typeof record.at !== "number" ||
+    !Number.isFinite(record.at)
+  ) {
+    return undefined;
+  }
+  return {
+    code: record.code as WorkflowTerminationCode,
+    message: record.message,
+    outcome: record.outcome,
+    at: record.at,
+    budget: normalizeBudgetTelemetry(record.budget) ?? {
+      turns: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      outputComplete: false,
+      costComplete: false,
+    },
+  };
+}
+
 export function aggregateUsage(agents: AgentRecord[]): AgentUsage {
   const total = emptyUsage();
   for (const agent of agents) {
-    total.input += agent.usage.input;
-    total.output += agent.usage.output;
-    total.cacheRead += agent.usage.cacheRead;
-    total.cacheWrite += agent.usage.cacheWrite;
-    total.cost += agent.usage.cost;
-    total.turns += agent.usage.turns;
+    const usage = normalizeAgentUsage(agent.usage);
+    total.input += usage.input;
+    total.output += usage.output;
+    total.cacheRead += usage.cacheRead;
+    total.cacheWrite += usage.cacheWrite;
+    total.cost += usage.cost;
+    total.outputComplete =
+      total.outputComplete !== false && usage.outputComplete !== false;
+    total.costComplete =
+      total.costComplete !== false && usage.costComplete !== false;
+    total.turns += usage.turns;
   }
   return total;
 }
@@ -213,12 +362,20 @@ export function countStates(details: WorkflowDetails) {
   let done = 0;
   let failed = 0;
   let running = 0;
+  let queued = 0;
   for (const agent of details.agents) {
     if (agent.state === "done") done++;
     else if (agent.state === "error") failed++;
+    else if (agent.state === "queued") queued++;
     else running++;
   }
-  return { done, failed, running };
+  return { done, failed, running, queued };
+}
+
+export function formatAgentLifecycle(details: WorkflowDetails): string {
+  const { done, failed, running, queued } = countStates(details);
+  const settled = done + failed;
+  return `${settled}/${details.agents.length} agents${running ? ` · ${running} running` : ""}${queued ? ` · ${queued} queued` : ""}`;
 }
 
 export interface PhaseGroup {

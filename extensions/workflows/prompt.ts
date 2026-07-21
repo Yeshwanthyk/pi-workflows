@@ -20,12 +20,12 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
   "The workflow tool is only to be called when the user says 'ultracode' or specifically requests a workflow run.",
   "Run a multi-agent workflow from a JavaScript orchestration script you write inline. Use this when a task benefits from fanning work out across several isolated subagents in ordered phases (research fan-out, per-file review, verify-then-synthesize pipelines).",
   "The script runs as an async function body with these primitives:",
-  "• export const meta = { name, description, phases: [{ title, detail? }] } — metadata for the progress UI. Declare all phases up front.",
+  "• export const meta = { name, description, phases: [{ title, detail? }], limits? } — static metadata for the progress UI and optional run limits. Declare all phases up front. `limits` is a closed literal-only object: { concurrency?, workflow?: { wallMs?, idleMs? }, agent?: { wallMs?, idleMs? }, total?: { turns?, outputTokens?, costUsd? } }. Concurrency and durations are positive safe integers; turns/outputTokens are non-negative safe integers; costUsd is non-negative finite. Omitted budgets are unbounded.",
   "• phase(title) — mark the current phase at runtime (use titles from meta.phases).",
   "• await agent(prompt, { label?, phase?, schema?, model?, provider?, effort? }) — run ONE subagent in an isolated context and wait for it. Always resolves to { ok, output, structured?, error? }. Check `ok` before using the result. When you pass a JSON `schema`, `structured` holds the validated object on success. `model`/`provider` override the session model; `effort` sets the thinking level (off|minimal|low|medium|high|xhigh|max). Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate or ask the user.",
-  "• await parallel([() => agent(...), () => agent(...)], { concurrency? }) — run zero-argument agent thunks concurrently and return results in order. Concurrency is globally capped at 4 for the run.",
+  "• await parallel([() => agent(...), () => agent(...)], { concurrency? }) — run zero-argument agent thunks concurrently and return results in order. Omitted concurrency defaults to min(4, the run cap); explicit concurrency may use the resolved run cap. A process-global host pool remains authoritative.",
   "• args — the parsed value of the `args` tool parameter (or undefined).",
-  "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. A run may make at most 32 agent calls and has no overall deadline. Each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly; after that, agent() has no wall-clock deadline. Each individual child tool call times out independently after 3 minutes, becomes an error tool result, and leaves the agent loop free to recover. Use map/filter/if/await/template strings to orchestrate, and `return` a JSON-serializable aggregate.",
+  "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. A run may make at most 32 agent calls. Requested concurrency is clamped to the host hard capacity (min(16, max(1, availableParallelism - 2))); omission uses min(4, hard capacity). Optional metadata budgets bound workflow/agent wall and idle time plus total turns, output tokens, and cost. Configured output/cost budgets fail closed when finalized provider usage is missing or non-finite; finite zero is known usage. Each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly. Each individual child tool call times out independently after 3 minutes, becomes an error tool result, and leaves the agent loop free to recover. Use map/filter/if/await/template strings to orchestrate, and `return` a JSON-serializable aggregate.",
   "Pass a `schema` to agent() whenever a later step branches on the result, so you get typed fields instead of prose. There is no resume: a failed run is simply re-run. Artifacts are saved under ~/.pi/agent/workflows/<runId>/ for inspection.",
   "Example:",
   "export const meta = { name: 'reliability-review', description: 'Review modules for reliability risks, then report', phases: [{ title: 'Scan' }, { title: 'Report' }] }",
@@ -87,7 +87,7 @@ export function buildWorkflowResultMessage(
           ? "ok"
           : agent.state === "error"
             ? "FAILED"
-            : "running";
+            : agent.state;
       lines.push(
         `- [${agent.label}]${agent.phase ? ` (${agent.phase})` : ""} ${status}` +
           (agent.error ? ` — ${agent.error}` : ""),

@@ -288,6 +288,46 @@ test("shutdown helper shares abort, hook, and disposal under one deadline", asyn
   assert.deepEqual(events, ["abort", "aborted", "hook", "dispose"]);
 });
 
+test("shutdown helper upgrades an in-flight orderly teardown to abort exactly once", async () => {
+  const events: string[] = [];
+  let releaseHook: (() => void) | undefined;
+  const hook = new Promise<void>((resolve) => {
+    releaseHook = resolve;
+  });
+  const session: DisposableChildSession = {
+    abort: async () => {
+      events.push("abort");
+    },
+    extensionRunner: {
+      hasHandlers: () => true,
+      emit: async () => {
+        events.push("hook");
+        await hook;
+      },
+    },
+    dispose() {
+      events.push("dispose");
+    },
+  };
+
+  const orderly = shutdownAndDisposeChildSession(session, { timeoutMs: 100 });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(events, ["hook"]);
+  const upgraded = shutdownAndDisposeChildSession(session, {
+    abort: true,
+    timeoutMs: 100,
+  });
+  const repeated = shutdownAndDisposeChildSession(session, { abort: true });
+  assert.equal(orderly, upgraded);
+  assert.equal(upgraded, repeated);
+  await Promise.resolve();
+  assert.deepEqual(events, ["hook", "abort"]);
+  releaseHook?.();
+  await orderly;
+  assert.deepEqual(events, ["hook", "abort", "dispose"]);
+});
+
 test("shutdown helper disposes when abort exhausts the shared deadline", async () => {
   const events: string[] = [];
   const session: DisposableChildSession = {

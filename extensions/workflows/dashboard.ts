@@ -27,13 +27,18 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 import { loadWorkflowArtifacts, normalizeTranscript } from "./artifacts.ts";
+import { normalizeEffectiveWorkflowLimits } from "./limits.ts";
 import {
   agentContext,
   countStates,
+  formatAgentLifecycle,
   formatElapsed,
   formatUsage,
   aggregateUsage,
   isWorkflowThinkingLevel,
+  normalizeAgentUsage,
+  normalizeBudgetTelemetry,
+  normalizeTerminationRecord,
   phaseGroups,
   resultJson,
   shortenHome,
@@ -68,7 +73,7 @@ function runsDir(): string {
 }
 
 /** Leniently normalize a workflow.json (including runs from older tooling). */
-function normalizeDetails(
+export function normalizeDetails(
   runId: string,
   raw: unknown,
 ): WorkflowDetails | undefined {
@@ -85,9 +90,11 @@ function normalizeDetails(
     const state =
       a.state === "error" || a.state === "failed"
         ? "error"
-        : a.state === "running"
-          ? "running"
-          : "done";
+        : a.state === "queued"
+          ? "queued"
+          : a.state === "running"
+            ? "running"
+            : "done";
     agents.push({
       index: typeof a.index === "number" ? a.index : agents.length + 1,
       label:
@@ -104,22 +111,25 @@ function normalizeDetails(
         a.contextWindow > 0
           ? a.contextWindow
           : undefined,
-      startedAt: typeof a.startedAt === "number" ? a.startedAt : startedAt,
+      queuedAt:
+        typeof a.queuedAt === "number"
+          ? a.queuedAt
+          : typeof a.startedAt === "number"
+            ? a.startedAt
+            : startedAt,
+      startedAt:
+        typeof a.startedAt === "number"
+          ? a.startedAt
+          : state === "queued"
+            ? undefined
+            : startedAt,
       finishedAt: typeof a.finishedAt === "number" ? a.finishedAt : undefined,
       error:
         typeof a.error === "string" && a.error !== "[undefined]"
           ? a.error
           : undefined,
       preview: typeof a.preview === "string" ? a.preview : "",
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        cost: 0,
-        turns: 0,
-        ...(a.usage && typeof a.usage === "object" ? (a.usage as object) : {}),
-      },
+      usage: normalizeAgentUsage(a.usage),
       transcript: normalizeTranscript(a.transcript),
     });
   }
@@ -139,6 +149,8 @@ function normalizeDetails(
       ...(typeof p.detail === "string" ? { detail: p.detail } : {}),
     });
   }
+
+  const limits = normalizeEffectiveWorkflowLimits(record.limits);
 
   const status =
     record.status === "running" ||
@@ -166,6 +178,9 @@ function normalizeDetails(
     background: record.background === true,
     status,
     startedAt,
+    limits,
+    budget: normalizeBudgetTelemetry(record.budget),
+    termination: normalizeTerminationRecord(record.termination),
     finishedAt:
       typeof record.finishedAt === "number" ? record.finishedAt : undefined,
     phases,
@@ -203,6 +218,36 @@ export function sessionWorkflowRunIds(ctx: ExtensionContext): Set<string> {
   return runIds;
 }
 
+/** Load and recover one persisted run independently of any UI surface. */
+export function loadStoredRunDetails(
+  runId: string,
+  runDir = path.join(runsDir(), runId),
+  now = Date.now(),
+): WorkflowDetails | undefined {
+  try {
+    const raw = JSON.parse(
+      fs.readFileSync(path.join(runDir, "workflow.json"), "utf8"),
+    );
+    const details = normalizeDetails(runId, raw);
+    if (!details) return undefined;
+    loadWorkflowArtifacts(runDir, details);
+    if (details.status !== "running") return details;
+
+    details.status = "aborted";
+    details.finishedAt = details.finishedAt ?? now;
+    details.error = details.error ?? "Recovered stale run that was not active";
+    for (const agent of details.agents) {
+      if (agent.state !== "running" && agent.state !== "queued") continue;
+      agent.state = "error";
+      agent.error = agent.error ?? "Run ended before this agent settled";
+      agent.finishedAt = details.finishedAt;
+    }
+    return details;
+  } catch {
+    return undefined;
+  }
+}
+
 export function loadRunEntries(
   active: Map<string, WorkflowDetails>,
   sessionId: string,
@@ -221,49 +266,39 @@ export function loadRunEntries(
       entries.push({ runId, details: live, live: true });
       continue;
     }
-    try {
-      const raw = JSON.parse(
-        fs.readFileSync(path.join(runsDir(), runId, "workflow.json"), "utf8"),
-      );
-      const details = normalizeDetails(runId, raw);
-      if (
-        details &&
-        (details.sessionId === sessionId || referencedRunIds.has(runId))
-      ) {
-        loadWorkflowArtifacts(path.join(runsDir(), runId), details);
-        if (details.status === "running") {
-          details.status = "aborted";
-          details.finishedAt = details.finishedAt ?? Date.now();
-          details.error =
-            details.error ?? "Recovered stale run that was not active";
-          for (const agent of details.agents) {
-            if (agent.state !== "running") continue;
-            agent.state = "error";
-            agent.error = agent.error ?? "Run ended before this agent settled";
-            agent.finishedAt = details.finishedAt;
-          }
-        }
-        entries.push({ runId, details, live: false });
-      }
-    } catch {
-      // Skip unreadable runs.
+    const details = loadStoredRunDetails(runId);
+    if (
+      details &&
+      (details.sessionId === sessionId || referencedRunIds.has(runId))
+    ) {
+      entries.push({ runId, details, live: false });
     }
   }
   return entries.sort((a, b) => b.details.startedAt - a.details.startedAt);
 }
 
-function buildReport(details: WorkflowDetails): string {
-  const { done, failed } = countStates(details);
+export function buildReport(details: WorkflowDetails): string {
+  const { done, failed, queued, running } = countStates(details);
   const lines: string[] = [
     `# Workflow ${details.name ?? details.runId}`,
     "",
     `- Run: ${details.runId}`,
     `- Status: ${statusWord(details.status)}`,
-    `- Agents: ${done}/${details.agents.length} ok${failed ? `, ${failed} failed` : ""}`,
+    `- Agents: ${done}/${details.agents.length} ok${failed ? `, ${failed} failed` : ""}${running ? `, ${running} running` : ""}${queued ? `, ${queued} queued` : ""}`,
     `- Elapsed: ${formatElapsed(details.startedAt, details.finishedAt)}`,
   ];
+  if (details.limits) {
+    lines.push(
+      `- Capacity: concurrency ${details.limits.concurrency}, host hard capacity ${details.limits.hardCapacity}`,
+    );
+  }
   const totals = formatUsage(aggregateUsage(details.agents));
   if (totals) lines.push(`- Usage: ${totals}`);
+  if (details.budget) {
+    lines.push(
+      `- Budget telemetry: ${details.budget.turns} turns, ${details.budget.outputTokens} output tokens${details.budget.outputComplete ? "" : " (incomplete)"}, $${details.budget.costUsd.toFixed(4)}${details.budget.costComplete ? "" : " (incomplete)"}`,
+    );
+  }
   if (details.description) lines.push("", details.description);
   if (details.error) lines.push("", `**Error:** ${details.error}`);
 
@@ -279,7 +314,7 @@ function buildReport(details: WorkflowDetails): string {
           ? "ok"
           : agent.state === "error"
             ? "FAILED"
-            : "running";
+            : agent.state;
       const stats = [
         agent.model,
         agent.thinkingLevel ? `think:${agent.thinkingLevel}` : undefined,
@@ -683,12 +718,13 @@ export class WorkflowDashboard {
       const label = selected
         ? theme.fg("accent", name)
         : theme.fg("text", name);
-      const { done, failed } = countStates(d);
+      const { done, failed, running, queued } = countStates(d);
       const settled = done + failed;
+      const lifecycle = `${settled}/${d.agents.length}${running ? ` r${running}` : ""}${queued ? ` q${queued}` : ""}`;
       const right =
         theme.fg(
           "dim",
-          `${settled}/${d.agents.length} agents · ${formatElapsed(d.startedAt, d.finishedAt)} · `,
+          `${lifecycle} agents · ${formatElapsed(d.startedAt, d.finishedAt)} · `,
         ) +
         theme.fg(statusColor(d.status), statusWord(d.status)) +
         " ";
@@ -713,12 +749,11 @@ export class WorkflowDashboard {
     const theme = this.theme;
     const lines: string[] = [];
 
-    const { done, failed } = countStates(d);
-    const settled = done + failed;
+    const lifecycle = formatAgentLifecycle(d);
     const right =
       theme.fg(
         "dim",
-        `${settled}/${d.agents.length} agents · ${formatElapsed(d.startedAt, d.finishedAt)} · `,
+        `${lifecycle} · ${formatElapsed(d.startedAt, d.finishedAt)} · `,
       ) +
       theme.fg(statusColor(d.status), statusWord(d.status)) +
       " ";
@@ -730,7 +765,15 @@ export class WorkflowDashboard {
       ),
     );
     const totals = formatUsage(aggregateUsage(d.agents));
-    const subLeft = " " + theme.fg("muted", d.description ?? d.runId);
+    const capacity = d.limits
+      ? `concurrency ${d.limits.concurrency}/${d.limits.hardCapacity}`
+      : undefined;
+    const subLeft =
+      " " +
+      theme.fg(
+        "muted",
+        [d.description ?? d.runId, capacity].filter(Boolean).join(" · "),
+      );
     lines.push(
       this.split(subLeft, totals ? theme.fg("dim", `${totals} `) : " ", width),
     );
@@ -758,7 +801,13 @@ export class WorkflowDashboard {
         ? theme.fg(this.detailFocus === "phases" ? "accent" : "muted", "❯")
         : " ";
       const groupDone = group.agents.filter(
-        (a) => a.state !== "running",
+        (a) => a.state === "done" || a.state === "error",
+      ).length;
+      const groupRunning = group.agents.filter(
+        (a) => a.state === "running",
+      ).length;
+      const groupQueued = group.agents.filter(
+        (a) => a.state === "queued",
       ).length;
       const square = groupSquare(group, theme);
       const title =
@@ -767,7 +816,10 @@ export class WorkflowDashboard {
           : theme.fg("text", group.title);
       const counts =
         group.agents.length > 0
-          ? theme.fg("dim", `${groupDone}/${group.agents.length} `)
+          ? theme.fg(
+              "dim",
+              `${groupDone}/${group.agents.length}${groupRunning ? ` r${groupRunning}` : ""}${groupQueued ? ` q${groupQueued}` : ""} `,
+            )
           : theme.fg("dim", "- ");
       return this.split(` ${marker} ${square} ${title}`, counts, sidebarInner);
     });
@@ -978,7 +1030,7 @@ function statusSquareFor(details: WorkflowDetails, theme: Theme): string {
 
 function groupSquare(group: PhaseGroup, theme: Theme): string {
   if (group.agents.length === 0) return theme.fg("dim", SQUARE);
-  if (group.agents.some((a) => a.state === "running"))
+  if (group.agents.some((a) => a.state === "running" || a.state === "queued"))
     return theme.fg("warning", SQUARE);
   if (group.agents.some((a) => a.state === "error"))
     return theme.fg("error", SQUARE);

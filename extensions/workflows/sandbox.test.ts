@@ -12,6 +12,7 @@ function run(
     args: undefined,
     cwd: process.cwd(),
     signal: abort.signal,
+    concurrency: 4,
     onAgent: async (prompt) => ({ ok: true, output: `reply:${prompt}` }),
     onPhase: () => {},
     ...overrides,
@@ -130,6 +131,44 @@ test("workflow cancellation aborts a pending agent request", async () => {
 
   await started;
   controller.abort(new Error("cancel fixture"));
-  await assert.rejects(pending, /Workflow was aborted/);
+  await assert.rejects(pending, /cancel fixture/);
   assert.equal(requestAborted, true);
+});
+
+test("sandbox parallel defaults to four but explicit concurrency reaches runtime cap", async () => {
+  const measure = async (parallelOptions: string) => {
+    let active = 0;
+    let peak = 0;
+    await run(
+      `await parallel(Array.from({ length: 12 }, (_, i) => () => agent(String(i)))${parallelOptions}); return true;`,
+      {
+        concurrency: 8,
+        onAgent: async () => {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          active--;
+          return { ok: true, output: "ok" };
+        },
+      },
+    );
+    return peak;
+  };
+
+  assert.equal(await measure(""), 4);
+  assert.equal(await measure(", { concurrency: 8 }"), 8);
+});
+
+test("sandbox runtime concurrency fails closed and preserves the 32-call limit", async () => {
+  await assert.rejects(
+    run(`return true`, { concurrency: 0 }),
+    /runtime concurrency/,
+  );
+  await assert.rejects(
+    run(
+      `return await parallel(Array.from({ length: 33 }, (_, i) => () => agent(String(i))), { concurrency: 16 });`,
+      { concurrency: 16 },
+    ),
+    /agent request budget/,
+  );
 });

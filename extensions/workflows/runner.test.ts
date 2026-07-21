@@ -12,6 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
+  createFinalizedUsageAccumulator,
   createFirstResponseWatchdog,
   guardWorkflowChildTools,
   recordToolExecutionTiming,
@@ -19,6 +20,7 @@ import {
   transcriptFromMessages,
   type ToolExecutionTiming,
 } from "./runner.ts";
+import type { AgentUsage } from "./model.ts";
 
 const zeroUsage = {
   input: 0,
@@ -113,6 +115,9 @@ async function runMissingStructuredOutputRecovery(recover = true) {
   });
   const modelRegistry = ModelRegistry.inMemory(AuthStorage.inMemory());
   const prompts: string[] = [];
+  let turnStarts = 0;
+  let activities = 0;
+  const progressUsage: AgentUsage[] = [];
 
   const outcome = await runAgent({
     prompt: "return structured output",
@@ -126,32 +131,48 @@ async function runMissingStructuredOutputRecovery(recover = true) {
     loader,
     settingsManager,
     modelRegistry,
+    onTurnStart: () => turnStarts++,
+    onActivity: () => activities++,
+    onProgress: (progress) => progressUsage.push(progress.usage),
     createSession: async (creationOptions) => {
       const tools = new Map(
         (creationOptions?.customTools ?? []).map((tool) => [tool.name, tool]),
       );
       const messages: AgentSession["messages"] = [];
+      let listener: AgentSessionEventListener | undefined;
       const session = {
         messages,
         model: undefined,
         bindExtensions: async () => {},
         getAllTools: () => [...tools.keys()].map((name) => ({ name })),
         getToolDefinition: (name: string) => tools.get(name),
-        subscribe: (_listener: AgentSessionEventListener) => () => {},
+        subscribe: (next: AgentSessionEventListener) => {
+          listener = next;
+          return () => {
+            listener = undefined;
+          };
+        },
         getContextUsage: () => undefined,
         prompt: async (prompt: string) => {
           prompts.push(prompt);
+          listener?.({ type: "turn_start" });
           if (prompts.length === 1) {
-            messages.push({
-              role: "assistant",
-              content: [{ type: "text", text: '{"value":"plain-json"}' }],
-              api: "openai-responses",
+            // Tool-loop continuations start provider turns without a new prompt.
+            listener?.({ type: "turn_start" });
+            const message = {
+              role: "assistant" as const,
+              content: [
+                { type: "text" as const, text: '{"value":"plain-json"}' },
+              ],
+              api: "openai-responses" as const,
               provider: "fixture",
               model: "fixture",
               usage: zeroUsage,
-              stopReason: "stop",
+              stopReason: "stop" as const,
               timestamp: Date.now(),
-            });
+            };
+            messages.push(message);
+            listener?.({ type: "message_end", message });
             return;
           }
           if (!recover) {
@@ -167,6 +188,18 @@ async function runMissingStructuredOutputRecovery(recover = true) {
             });
             return;
           }
+          const message = {
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: "calling tool" }],
+            api: "openai-responses" as const,
+            provider: "fixture",
+            model: "fixture",
+            usage: zeroUsage,
+            stopReason: "toolUse" as const,
+            timestamp: Date.now() + 1,
+          };
+          messages.push(message);
+          listener?.({ type: "message_end", message });
           const structuredTool = tools.get("structured_output");
           if (!structuredTool)
             throw new Error("missing structured_output tool");
@@ -189,7 +222,7 @@ async function runMissingStructuredOutputRecovery(recover = true) {
     },
   });
 
-  return { outcome, prompts };
+  return { outcome, prompts, turnStarts, activities, progressUsage };
 }
 
 function parallelToolMessages(): AgentSession["messages"] {
@@ -236,6 +269,140 @@ function parallelToolMessages(): AgentSession["messages"] {
     },
   ];
 }
+
+test("finalized usage is cumulative, deduplicated, and treats finite zero cost as known", () => {
+  const updates: AgentUsage[] = [];
+  const accumulator = createFinalizedUsageAccumulator((usage) =>
+    updates.push(usage),
+  );
+  const message = parallelToolMessages()[1]!;
+  assert.equal(accumulator.add(message), true);
+  assert.equal(accumulator.add(message), false);
+  assert.equal(
+    accumulator.add(structuredClone(message) as typeof message),
+    false,
+  );
+  assert.equal(accumulator.usage.turns, 1);
+  assert.equal(accumulator.usage.cost, 0);
+  assert.equal(accumulator.usage.costComplete, true);
+  assert.equal(updates.length, 1);
+
+  const missing = {
+    ...message,
+    timestamp: 951,
+    usage: { ...zeroUsage, cost: undefined },
+  } as unknown as AgentSession["messages"][number];
+  assert.equal(accumulator.add(missing), true);
+  assert.equal(accumulator.usage.turns, 2);
+  assert.equal(accumulator.usage.costComplete, false);
+  assert.equal(
+    updates[0]?.turns,
+    1,
+    "later accumulator mutation cannot alter a published usage snapshot",
+  );
+
+  const distinct = structuredClone(message) as typeof message;
+  distinct.timestamp = 952;
+  assert.equal(accumulator.add(distinct), true);
+  assert.equal(accumulator.usage.turns, 3);
+
+  const identicalTurns = createFinalizedUsageAccumulator();
+  identicalTurns.addMessages([
+    message,
+    structuredClone(message) as typeof message,
+  ]);
+  assert.equal(
+    identicalTurns.usage.turns,
+    2,
+    "separate snapshot positions remain distinct turns",
+  );
+
+  const afterCompaction = createFinalizedUsageAccumulator();
+  afterCompaction.addMessages([message]);
+  afterCompaction.addFinalizedTurn(structuredClone(message) as typeof message);
+  afterCompaction.addMessages([structuredClone(message) as typeof message]);
+  assert.equal(
+    afterCompaction.usage.turns,
+    2,
+    "a new identical event remains distinct after the old turn is compacted",
+  );
+});
+
+test("finalized turn events reject duplicate object identity without conflating identical turns", () => {
+  const message = parallelToolMessages()[1]!;
+  const accumulator = createFinalizedUsageAccumulator();
+
+  assert.equal(accumulator.addFinalizedTurn(message), true);
+  assert.equal(accumulator.addFinalizedTurn(message), false);
+  assert.equal(accumulator.usage.turns, 1);
+
+  const distinctIdenticalTurn = structuredClone(message) as typeof message;
+  assert.equal(accumulator.addFinalizedTurn(distinctIdenticalTurn), true);
+  assert.equal(accumulator.addFinalizedTurn(distinctIdenticalTurn), false);
+  assert.equal(accumulator.usage.turns, 2);
+  assert.equal(
+    accumulator.addMessages([
+      structuredClone(message) as typeof message,
+      structuredClone(distinctIdenticalTurn) as typeof message,
+    ]),
+    0,
+    "a cloned authoritative snapshot must preserve occurrence accounting",
+  );
+});
+
+test("finalized usage retains all turns and compares complete large messages", () => {
+  const base = parallelToolMessages()[1]!;
+  const messages = Array.from({ length: 2_051 }, (_, index) => ({
+    ...structuredClone(base),
+    timestamp: index,
+    usage: {
+      ...zeroUsage,
+      input: 1,
+      output: 1,
+      cost: { ...zeroUsage.cost, total: 1 },
+    },
+  })) as AgentSession["messages"];
+  const accumulator = createFinalizedUsageAccumulator();
+
+  assert.equal(accumulator.addMessages(messages), 2_051);
+  assert.equal(
+    accumulator.addMessages(structuredClone(messages)),
+    0,
+    "a cloned authoritative snapshot must not recharge old turns",
+  );
+  assert.equal(accumulator.usage.turns, 2_051);
+  assert.equal(accumulator.usage.output, 2_051);
+  assert.equal(accumulator.usage.cost, 2_051);
+
+  const prefix = "x".repeat(70 * 1_024);
+  const large = ["first", "second"].map((suffix) => ({
+    ...structuredClone(base),
+    timestamp: 99_999,
+    content: [{ type: "text" as const, text: `${prefix}${suffix}` }],
+  })) as AgentSession["messages"];
+  assert.equal(accumulator.addMessages(large), 2);
+  assert.equal(accumulator.usage.turns, 2_053);
+});
+
+test("finalized usage marks missing and non-finite output incomplete", () => {
+  const accumulator = createFinalizedUsageAccumulator();
+  const message = parallelToolMessages()[1]!;
+  const missing = {
+    ...message,
+    usage: { ...zeroUsage, output: undefined },
+  } as unknown as AgentSession["messages"][number];
+  assert.equal(accumulator.add(missing), true);
+  assert.equal(accumulator.usage.output, 0);
+  assert.equal(accumulator.usage.outputComplete, false);
+
+  const nonFinite = {
+    ...message,
+    timestamp: 953,
+    usage: { ...zeroUsage, output: Number.NaN },
+  } as AgentSession["messages"][number];
+  assert.equal(accumulator.add(nonFinite), true);
+  assert.equal(accumulator.usage.outputComplete, false);
+});
 
 test("completed parallel tool calls pair lifecycle timings with calls and results", () => {
   const timings = new Map<string, ToolExecutionTiming>();
@@ -344,11 +511,20 @@ test("in-flight aborted tool calls retain start timing without completion", () =
 });
 
 test("runAgent recovers once when the model returns plain JSON instead of structured output", async () => {
-  const { outcome, prompts } = await runMissingStructuredOutputRecovery();
+  const { outcome, prompts, turnStarts, activities, progressUsage } =
+    await runMissingStructuredOutputRecovery();
 
   assert.equal(outcome.ok, true);
   assert.deepEqual(outcome.structured, { value: "recovered" });
   assert.equal(prompts.length, 2);
+  assert.equal(turnStarts, 3);
+  assert.ok(activities >= 6, "setup and prompt boundaries emit activity");
+  assert.equal(outcome.usage.turns, 2);
+  assert.equal(
+    progressUsage[0]?.turns,
+    1,
+    "late accumulator mutation cannot alter published progress after finalization",
+  );
   assert.match(prompts[1], /call the required `structured_output` tool/i);
 });
 
@@ -374,6 +550,83 @@ test("runAgent omits structured output after an abort", async () => {
   assert.equal(outcome.ok, false);
   assert.equal(outcome.aborted, true);
   assert.equal("structured" in outcome, false);
+});
+
+test("runAgent upgrades orderly teardown when cancellation races it", async () => {
+  const settingsManager = SettingsManager.inMemory();
+  const loader = new DefaultResourceLoader({
+    cwd: process.cwd(),
+    agentDir: process.cwd(),
+    settingsManager,
+  });
+  const modelRegistry = ModelRegistry.inMemory(AuthStorage.inMemory());
+  const cancellation = new AbortController();
+  let listener: AgentSessionEventListener | undefined;
+  let releaseShutdown: (() => void) | undefined;
+  let markShutdownStarted: (() => void) | undefined;
+  const shutdownStarted = new Promise<void>((resolve) => {
+    markShutdownStarted = resolve;
+  });
+  let aborts = 0;
+
+  const running = runAgent({
+    prompt: "finish",
+    cwd: process.cwd(),
+    loader,
+    settingsManager,
+    modelRegistry,
+    signal: cancellation.signal,
+    createSession: async () => {
+      const messages: AgentSession["messages"] = [];
+      const session = {
+        messages,
+        model: undefined,
+        bindExtensions: async () => {},
+        getAllTools: () => [],
+        getToolDefinition: () => undefined,
+        subscribe: (next: AgentSessionEventListener) => {
+          listener = next;
+          return () => {
+            listener = undefined;
+          };
+        },
+        getContextUsage: () => undefined,
+        prompt: async () => {
+          const message = {
+            ...structuredClone(parallelToolMessages()[1]!),
+            content: [{ type: "text" as const, text: "done" }],
+            stopReason: "stop" as const,
+          };
+          messages.push(message);
+          listener?.({ type: "message_end", message });
+        },
+        abort: async () => {
+          aborts++;
+        },
+        extensionRunner: {
+          hasHandlers: () => true,
+          emit: async () => {
+            markShutdownStarted?.();
+            await new Promise<void>((resolve) => {
+              releaseShutdown = resolve;
+            });
+          },
+        },
+        dispose: () => {},
+      } as unknown as AgentSession;
+      return { session };
+    },
+  });
+
+  await shutdownStarted;
+  cancellation.abort(new Error("late cancellation"));
+  assert.equal(aborts, 1, "teardown is upgraded before orderly hooks finish");
+  releaseShutdown?.();
+
+  const outcome = await running;
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.aborted, true);
+  assert.equal(outcome.error, "late cancellation");
 });
 
 test("first-response watchdog awaits retained teardown before rejecting", async () => {

@@ -33,7 +33,9 @@ const BOOTSTRAP = String.raw`
 (function bootstrapWorkflowApi() {
   "use strict";
   const callHost = globalThis.__hostBridge;
+  const runtimeConcurrency = globalThis.__runtimeConcurrency;
   delete globalThis.__hostBridge;
+  delete globalThis.__runtimeConcurrency;
   let nextRequestId = 0;
   const unconsumed = new Set();
   const inFlight = new Set();
@@ -102,13 +104,13 @@ const BOOTSTRAP = String.raw`
 
   async function parallel(items, options = {}) {
     if (!Array.isArray(items)) throw new Error("parallel() expects an array of zero-argument agent thunks");
-    const requested = options && typeof options.concurrency === "number"
-      ? Math.floor(options.concurrency)
-      : 4;
-    if (!Number.isFinite(requested) || requested < 1) {
+    const requested = options && options.concurrency !== undefined
+      ? options.concurrency
+      : Math.min(4, runtimeConcurrency);
+    if (!Number.isSafeInteger(requested) || requested < 1) {
       throw new Error("parallel(): concurrency must be a positive integer");
     }
-    const concurrency = Math.min(4, requested);
+    const concurrency = Math.min(runtimeConcurrency, requested);
     return mapLimited(items, concurrency, (item) => {
       if (typeof item !== "function") {
         throw new Error("parallel() items must be zero-argument functions");
@@ -178,14 +180,17 @@ process.on("message", (message) => {
       message.kind !== "init" ||
       typeof message.token !== "string" ||
       typeof message.source !== "string" ||
-      typeof message.argsJson !== "string"
+      typeof message.argsJson !== "string" ||
+      !Number.isSafeInteger(message.runtimeConcurrency) ||
+      message.runtimeConcurrency < 1 ||
+      message.runtimeConcurrency > 16
     ) {
       process.exitCode = 1;
       return;
     }
     initialized = true;
     token = message.token;
-    run(message.source, message.argsJson);
+    run(message.source, message.argsJson, message.runtimeConcurrency);
     return;
   }
   if (message.token !== token || message.kind !== "agentResult") return;
@@ -202,10 +207,11 @@ process.on("message", (message) => {
     );
 });
 
-function run(source, argsJson) {
+function run(source, argsJson, runtimeConcurrency) {
   try {
     const sandbox = Object.create(null);
     sandbox.__argsJson = argsJson;
+    sandbox.__runtimeConcurrency = runtimeConcurrency;
     sandbox.__hostBridge = (kind, payloadJson) => {
       if (kind === "phase") {
         send({ kind: "phase", payloadJson });

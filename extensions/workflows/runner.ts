@@ -49,6 +49,7 @@ const TRANSCRIPT_MAX_ENTRIES = 200;
 export type WorkflowModel = NonNullable<ExtensionContext["model"]>;
 export type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 type AgentMessage = AgentSession["messages"][number];
+type AssistantMessage = Extract<AgentMessage, { role: "assistant" }>;
 type ToolTimingEvent = Extract<
   AgentSessionEvent,
   { type: "tool_execution_start" | "tool_execution_end" }
@@ -97,6 +98,12 @@ export interface RunAgentOptions {
   modelRegistry: ExtensionContext["modelRegistry"];
   signal?: AbortSignal;
   onProgress?: (progress: AgentProgress) => void;
+  /** Meaningful child lifecycle activity for workflow/agent idle budgets. */
+  onActivity?: () => void;
+  /** Called synchronously before every provider prompt, including recovery. */
+  onTurnStart?: () => void;
+  /** Idempotent cumulative finalized usage. */
+  onUsage?: (usage: AgentUsage) => void;
   /** Test-only override for the per-tool execution timeout. */
   toolCallTimeoutMs?: number;
   /** Test-only override for the first assistant response-event timeout. */
@@ -357,20 +364,124 @@ export function transcriptFromMessages(
   return bounded;
 }
 
-function computeUsage(messages: AgentMessage[]): AgentUsage {
+function finiteNonNegative(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
+/** Full canonical serialization: no truncation and no digest collisions. */
+function finalizedMessageKey(message: AssistantMessage): string {
+  const seen = new Map<object, number>();
+  const encode = (value: unknown): string => {
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
+    if (typeof value === "string") return `string:${JSON.stringify(value)}`;
+    if (typeof value === "boolean") return `boolean:${value}`;
+    if (typeof value === "number") {
+      if (Number.isNaN(value)) return "number:NaN";
+      if (value === Infinity) return "number:Infinity";
+      if (value === -Infinity) return "number:-Infinity";
+      if (Object.is(value, -0)) return "number:-0";
+      return `number:${value}`;
+    }
+    if (typeof value === "bigint") return `bigint:${value}`;
+    if (typeof value === "symbol")
+      return `symbol:${JSON.stringify(value.description)}`;
+    if (typeof value === "function")
+      return `function:${JSON.stringify(value.name)}`;
+
+    const prior = seen.get(value);
+    if (prior !== undefined) return `reference:${prior}`;
+    seen.set(value, seen.size);
+    if (Array.isArray(value)) return `[${value.map(encode).join(",")}]`;
+    if (value instanceof Date) return `date:${value.toISOString()}`;
+
+    const fields = Object.keys(value).sort();
+    return `{${fields
+      .map(
+        (field) =>
+          `${JSON.stringify(field)}:${encode((value as Record<string, unknown>)[field])}`,
+      )
+      .join(",")}}`;
+  };
+
+  return encode({
+    timestamp: message.timestamp,
+    api: message.api,
+    provider: message.provider,
+    model: message.model,
+    responseModel: message.responseModel,
+    stopReason: message.stopReason,
+    errorMessage: message.errorMessage,
+    usage: message.usage,
+    content: message.content,
+  });
+}
+
+/** Charge each finalized assistant snapshot position exactly once. */
+export function createFinalizedUsageAccumulator(
+  onUsage?: (usage: AgentUsage) => void,
+) {
   const usage = emptyUsage();
-  for (const msg of messages) {
-    if (msg.role !== "assistant") continue;
+  // Counts grow with actual finalized turns. Eviction would corrupt rescans.
+  const finalizedCounts = new Map<string, number>();
+  // A session may emit the same message_end object more than once. Identity
+  // rejects that event replay without conflating distinct byte-identical turns.
+  const finalizedObjects = new WeakSet<AssistantMessage>();
+  const charge = (message: AssistantMessage, key: string) => {
+    finalizedCounts.set(key, (finalizedCounts.get(key) ?? 0) + 1);
     usage.turns++;
-    const u = msg.usage;
-    if (!u) continue;
-    usage.input += u.input || 0;
-    usage.output += u.output || 0;
-    usage.cacheRead += u.cacheRead || 0;
-    usage.cacheWrite += u.cacheWrite || 0;
-    usage.cost += u.cost?.total || 0;
-  }
-  return usage;
+    const reported = message.usage;
+    usage.input += finiteNonNegative(reported?.input);
+    const output = reported?.output;
+    if (typeof output === "number" && Number.isFinite(output) && output >= 0) {
+      usage.output += output;
+    } else {
+      usage.outputComplete = false;
+    }
+    usage.cacheRead += finiteNonNegative(reported?.cacheRead);
+    usage.cacheWrite += finiteNonNegative(reported?.cacheWrite);
+    const cost = reported?.cost?.total;
+    if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) {
+      usage.cost += cost;
+    } else {
+      usage.costComplete = false;
+    }
+    onUsage?.({ ...usage });
+    return true;
+  };
+  const add = (message: AgentMessage) => {
+    if (message.role !== "assistant") return false;
+    const key = finalizedMessageKey(message);
+    if ((finalizedCounts.get(key) ?? 0) > 0) return false;
+    finalizedObjects.add(message);
+    return charge(message, key);
+  };
+  // message_end is the authoritative identity boundary for a new turn. This
+  // remains correct when compaction removes an older byte-identical message.
+  const addFinalizedTurn = (message: AgentMessage) => {
+    if (message.role !== "assistant" || finalizedObjects.has(message))
+      return false;
+    finalizedObjects.add(message);
+    return charge(message, finalizedMessageKey(message));
+  };
+  const addMessages = (messages: AgentMessage[]) => {
+    const occurrences = new Map<string, number>();
+    let added = 0;
+    for (const message of messages) {
+      if (message.role !== "assistant") continue;
+      finalizedObjects.add(message);
+      const key = finalizedMessageKey(message);
+      const occurrence = (occurrences.get(key) ?? 0) + 1;
+      occurrences.set(key, occurrence);
+      if ((finalizedCounts.get(key) ?? 0) >= occurrence) continue;
+      charge(message, key);
+      added++;
+    }
+    return added;
+  };
+  return { usage, add, addFinalizedTurn, addMessages };
 }
 
 function errorText(error: unknown): string {
@@ -432,6 +543,26 @@ export function createFirstResponseWatchdog(
   };
 }
 
+function isMeaningfulRunnerActivity(event: AgentSessionEvent) {
+  return (
+    event.type === "agent_start" ||
+    event.type === "agent_end" ||
+    event.type === "agent_settled" ||
+    event.type === "turn_start" ||
+    event.type === "turn_end" ||
+    event.type === "message_start" ||
+    event.type === "message_update" ||
+    event.type === "message_end" ||
+    event.type === "tool_execution_start" ||
+    event.type === "tool_execution_update" ||
+    event.type === "tool_execution_end" ||
+    event.type === "compaction_start" ||
+    event.type === "compaction_end" ||
+    event.type === "auto_retry_start" ||
+    event.type === "auto_retry_end"
+  );
+}
+
 function isAssistantResponseEvent(event: AgentSessionEvent) {
   return (
     (event.type === "message_start" ||
@@ -449,6 +580,7 @@ export async function runAgent(
   let session: AgentSession | undefined;
   let unsubscribeToolTimeout: (() => void) | undefined;
   try {
+    options.onActivity?.();
     customTools =
       options.schema !== undefined
         ? [
@@ -470,11 +602,14 @@ export async function runAgent(
       ...(customTools ? { customTools } : {}),
       ...childToolPolicy(),
     }));
+    options.onActivity?.();
     await bindChildSessionExtensions(session);
+    options.onActivity?.();
     unsubscribeToolTimeout = guardWorkflowChildTools(
       session,
       options.toolCallTimeoutMs,
     );
+    options.onActivity?.();
   } catch (error) {
     unsubscribeToolTimeout?.();
     if (session) await shutdownAndDisposeChildSession(session);
@@ -491,12 +626,10 @@ export async function runAgent(
   }
 
   const childSession = session;
-  let teardownPromise: Promise<void> | undefined;
   const teardown = (abort = false) =>
-    (teardownPromise ??= shutdownAndDisposeChildSession(childSession, {
-      abort,
-    }));
-  let usage = emptyUsage();
+    shutdownAndDisposeChildSession(childSession, { abort });
+  const usageAccumulator = createFinalizedUsageAccumulator(options.onUsage);
+  let usage = usageAccumulator.usage;
   let modelId = childSession.model?.id ?? options.model?.id;
   let contextWindow = childSession.model?.contextWindow;
   let stopReason: string | undefined;
@@ -505,7 +638,6 @@ export async function runAgent(
 
   const sync = () => {
     const messages = childSession.messages;
-    usage = computeUsage(messages);
 
     const sessionModel = childSession.model;
     modelId = sessionModel?.id ?? modelId;
@@ -551,8 +683,17 @@ export async function runAgent(
   };
 
   let markFirstResponse = () => {};
+  let promptTurnReserved = false;
   const unsubscribe = childSession.subscribe((event) => {
+    if (isMeaningfulRunnerActivity(event)) options.onActivity?.();
+    if (event.type === "turn_start") {
+      if (promptTurnReserved) promptTurnReserved = false;
+      else options.onTurnStart?.();
+    }
     if (isAssistantResponseEvent(event)) markFirstResponse();
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      usageAccumulator.addFinalizedTurn(event.message);
+    }
     if (
       event.type === "tool_execution_start" ||
       event.type === "tool_execution_end"
@@ -567,7 +708,7 @@ export async function runAgent(
     sync();
     options.onProgress?.({
       preview: finalOutput(childSession.messages),
-      usage,
+      usage: { ...usage },
       model: modelId,
       contextWindow,
       transcript: transcriptFromMessages(childSession.messages, toolTimings),
@@ -585,6 +726,9 @@ export async function runAgent(
   }
 
   const promptWithWatchdog = async (prompt: string) => {
+    options.onTurnStart?.();
+    promptTurnReserved = true;
+    options.onActivity?.();
     const watchdog = createFirstResponseWatchdog(() => teardown(true), {
       timeoutMs: options.firstResponseTimeoutMs,
       model: modelId,
@@ -616,25 +760,43 @@ export async function runAgent(
     errorMessage = errorMessage ?? errorText(error);
     stopReason = stopReason ?? "error";
   } finally {
-    options.signal?.removeEventListener("abort", onAbort);
-    unsubscribe();
-    unsubscribeToolTimeout?.();
+    // Finalize accounting while the abort listener is still attached: a
+    // fail-closed cost/output budget discovered here must abort this outcome.
+    usageAccumulator.addMessages(childSession.messages);
     sync();
     output = truncateUtf8(
       finalOutput(childSession.messages),
       AGENT_OUTPUT_MAX_BYTES,
     );
     transcript = transcriptFromMessages(childSession.messages, toolTimings);
+    options.onProgress?.({
+      preview: output,
+      usage: { ...usage },
+      model: modelId,
+      contextWindow,
+      transcript,
+    });
+    unsubscribe();
+    unsubscribeToolTimeout?.();
+    // Keep cancellation wired through orderly teardown. A late abort upgrades
+    // the helper's shared teardown and must govern the returned outcome.
     await teardown();
+    if (options.signal?.aborted) {
+      aborted = true;
+      await teardown(true);
+    }
+    options.signal?.removeEventListener("abort", onAbort);
   }
 
   if (aborted || stopReason === "aborted") {
     return {
       ok: false,
       output,
-      error: "Agent was aborted",
+      error: options.signal?.aborted
+        ? errorText(options.signal.reason)
+        : "Agent was aborted",
       aborted: true,
-      usage,
+      usage: { ...usage },
       model: modelId,
       contextWindow,
       transcript,
@@ -648,7 +810,7 @@ export async function runAgent(
       output,
       error: errorMessage ?? "Agent failed",
       aborted: false,
-      usage,
+      usage: { ...usage },
       model: modelId,
       contextWindow,
       transcript,
@@ -662,7 +824,7 @@ export async function runAgent(
       error:
         "Agent finished without calling structured_output; no structured result matching the schema was produced.",
       aborted: false,
-      usage,
+      usage: { ...usage },
       model: modelId,
       contextWindow,
       transcript,
@@ -674,7 +836,7 @@ export async function runAgent(
     output,
     structured,
     aborted: false,
-    usage,
+    usage: { ...usage },
     model: modelId,
     contextWindow,
     transcript,

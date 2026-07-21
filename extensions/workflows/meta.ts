@@ -10,6 +10,7 @@ import {
   type Property,
   type VariableDeclaration,
 } from "acorn";
+import { parseWorkflowLimits, type WorkflowLimits } from "./limits.ts";
 
 /** Static workflow metadata and source preparation helpers. */
 
@@ -22,6 +23,7 @@ export interface WorkflowMeta {
   name?: string;
   description?: string;
   phases: WorkflowPhase[];
+  limits?: WorkflowLimits;
 }
 
 export interface PreparedWorkflowScript {
@@ -121,10 +123,14 @@ function sanitizeMeta(value: unknown): WorkflowMeta {
     name?: unknown;
     description?: unknown;
     phases?: unknown;
+    limits?: unknown;
   };
   if (typeof raw.name === "string") meta.name = raw.name.slice(0, 160);
   if (typeof raw.description === "string") {
     meta.description = raw.description.slice(0, 2_000);
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "limits")) {
+    meta.limits = parseWorkflowLimits(raw.limits);
   }
   if (Array.isArray(raw.phases)) {
     for (const item of raw.phases.slice(0, 64)) {

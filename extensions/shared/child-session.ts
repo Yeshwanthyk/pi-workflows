@@ -91,7 +91,28 @@ export interface DisposableChildSession {
   dispose(): void;
 }
 
-const childShutdowns = new WeakMap<object, Promise<void>>();
+interface ChildShutdownState {
+  deadline: number;
+  abortPromise?: Promise<unknown>;
+  shutdown: Promise<void>;
+}
+
+const childShutdowns = new WeakMap<object, ChildShutdownState>();
+
+function requestChildAbort(
+  state: ChildShutdownState,
+  session: DisposableChildSession,
+) {
+  if (state.abortPromise || !session.abort) return;
+  try {
+    state.abortPromise = Promise.resolve(session.abort()).then(
+      () => undefined,
+      () => undefined,
+    );
+  } catch {
+    state.abortPromise = Promise.resolve();
+  }
+}
 
 function waitUntil(operation: Promise<unknown>, deadline: number) {
   const remainingMs = Math.max(0, deadline - Date.now());
@@ -119,15 +140,22 @@ export function shutdownAndDisposeChildSession(
   options: { abort?: boolean; timeoutMs?: number } = {},
 ) {
   const existing = childShutdowns.get(session);
-  if (existing) return existing;
+  if (existing) {
+    if (options.abort) requestChildAbort(existing, session);
+    return existing.shutdown;
+  }
 
-  const shutdown = (async () => {
-    const deadline =
-      Date.now() + (options.timeoutMs ?? CHILD_SHUTDOWN_TIMEOUT_MS);
+  const state: ChildShutdownState = {
+    deadline: Date.now() + (options.timeoutMs ?? CHILD_SHUTDOWN_TIMEOUT_MS),
+    shutdown: Promise.resolve(),
+  };
+  childShutdowns.set(session, state);
+  if (options.abort) requestChildAbort(state, session);
+  state.shutdown = Promise.resolve().then(async () => {
     try {
       try {
-        if (options.abort && session.abort) {
-          await waitUntil(session.abort(), deadline);
+        if (state.abortPromise) {
+          await waitUntil(state.abortPromise, state.deadline);
         }
       } catch {
         // Abort is best-effort; shutdown hooks still receive their chance.
@@ -139,11 +167,19 @@ export function shutdownAndDisposeChildSession(
               type: "session_shutdown",
               reason: "quit",
             }),
-            deadline,
+            state.deadline,
           );
         }
       } catch {
         // Extension runner inspection/emission is best-effort during teardown.
+      }
+      // A cancellation may upgrade teardown while shutdown hooks are running.
+      try {
+        if (state.abortPromise) {
+          await waitUntil(state.abortPromise, state.deadline);
+        }
+      } catch {
+        // Abort remains best-effort.
       }
     } finally {
       try {
@@ -152,8 +188,7 @@ export function shutdownAndDisposeChildSession(
         // Disposal is terminal and must remain idempotent for callers.
       }
     }
-  })();
+  });
 
-  childShutdowns.set(session, shutdown);
-  return shutdown;
+  return state.shutdown;
 }

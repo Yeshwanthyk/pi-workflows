@@ -31,6 +31,8 @@ export interface RunWorkflowSandboxOptions {
   args: unknown;
   cwd: string;
   signal: AbortSignal;
+  /** Already-resolved effective run concurrency. */
+  concurrency: number;
   onAgent: (
     prompt: string,
     options: SandboxAgentOptions,
@@ -49,6 +51,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function abortError(signal: AbortSignal) {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Workflow was aborted", { cause: signal.reason });
 }
 
 function terminateChild(child: ChildProcess) {
@@ -77,13 +85,22 @@ function sanitizeAgentOptions(value: unknown): SandboxAgentOptions {
  * Execute orchestration code in a separate, permission-restricted Node process.
  * The child can only invoke the narrow agent/phase IPC protocol and is always
  * terminated on completion, cancellation, or protocol failure. The workflow
- * itself and its agent requests have no wall-clock deadline. Active requests
- * are aborted only when the workflow is cancelled or the sandbox is cleaned up.
+ * itself has no sandbox-owned deadline; the parent controller applies any
+ * configured workflow/agent budgets and aborts active requests when required.
  */
 export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
   if (!process.allowedNodeEnvironmentFlags.has("--permission")) {
     return Promise.reject(
       new Error("This Node runtime cannot enforce workflow child permissions"),
+    );
+  }
+  if (
+    !Number.isSafeInteger(options.concurrency) ||
+    options.concurrency < 1 ||
+    options.concurrency > 16
+  ) {
+    return Promise.reject(
+      new Error("Workflow runtime concurrency must be an integer from 1 to 16"),
     );
   }
   if (byteLength(options.source) > MAX_SOURCE_BYTES) {
@@ -130,7 +147,11 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
 
     const cleanup = () => {
       for (const abortController of activeAgentRequests.values()) {
-        abortController.abort(new Error("Workflow stopped"));
+        abortController.abort(
+          options.signal.aborted
+            ? options.signal.reason
+            : new Error("Workflow stopped"),
+        );
       }
       activeAgentRequests.clear();
       options.signal.removeEventListener("abort", onAbort);
@@ -146,7 +167,7 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
       if (error) reject(error);
       else resolve(value);
     };
-    const onAbort = () => finish(new Error("Workflow was aborted"));
+    const onAbort = () => finish(abortError(options.signal));
 
     options.signal.addEventListener("abort", onAbort, { once: true });
     if (options.signal.aborted) {
@@ -297,6 +318,7 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
         token,
         source: options.source,
         argsJson,
+        runtimeConcurrency: options.concurrency,
       },
       (error) => {
         if (error) finish(error);

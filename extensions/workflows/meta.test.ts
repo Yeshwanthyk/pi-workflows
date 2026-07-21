@@ -19,6 +19,42 @@ test("metadata is decoded statically and removed from executable source", () => 
   assert.equal(prepared.source.split("\n").length, source.split("\n").length);
 });
 
+test("metadata limits use a closed static schema without changing old metadata", () => {
+  const prepared = prepareWorkflowScript(`export const meta = {
+    name: "bounded",
+    legacyUnknown: "ignored",
+    limits: {
+      concurrency: 10,
+      workflow: { wallMs: 1000, idleMs: 500 },
+      agent: { wallMs: 400, idleMs: 200 },
+      total: { turns: 8, outputTokens: 9000, costUsd: 2.5 },
+    },
+  }; return true;`);
+  assert.deepEqual(prepared.meta, {
+    name: "bounded",
+    phases: [],
+    limits: {
+      concurrency: 10,
+      workflow: { wallMs: 1000, idleMs: 500 },
+      agent: { wallMs: 400, idleMs: 200 },
+      total: { turns: 8, outputTokens: 9000, costUsd: 2.5 },
+    },
+  });
+
+  for (const limits of [
+    `{ concurrency: 0 }`,
+    `{ concurrency: 1.5 }`,
+    `{ workflow: { wallMs: 0 } }`,
+    `{ agent: { idleMs: 0 / 0 } }`,
+    `{ total: { costUsd: 1 / 0 } }`,
+    `{ surprise: 1 }`,
+  ]) {
+    assert.throws(() =>
+      prepareWorkflowScript(`export const meta = { limits: ${limits} };`),
+    );
+  }
+});
+
 test("export-like text in strings, comments, regexes, and templates is untouched", () => {
   const source = `
     const string = "export default notSyntax";
