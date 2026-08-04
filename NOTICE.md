@@ -9,4 +9,4 @@ The extension sources in this repository were initially extracted from:
 
 Packaging files in this repository were added for local Pi installation. One compatibility fix keeps the first-response watchdog timer referenced until it settles; this is tracked in the local git history.
 
-At the extracted revision, the upstream repository had no declared license or LICENSE file. This repository is therefore `UNLICENSED`, intended only for local personal evaluation, and does not grant redistribution rights. Copyright remains with the upstream authors.
+At the extracted revision, the upstream repository had no declared license or LICENSE file. This repository is licensed under the MIT License; see `LICENSE`.
