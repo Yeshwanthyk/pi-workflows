@@ -12,7 +12,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types extensions/workflows/artifacts.test.ts extensions/workflows/controller.test.ts extensions/workflows/dashboard.test.ts extensions/workflows/limits.test.ts extensions/workflows/meta.test.ts extensions/workflows/model.test.ts extensions/workflows/runner.test.ts extensions/workflows/sandbox.test.ts extensions/workflows/serialization.test.ts extensions/shared/child-session.test.ts extensions/shared/context-utilization.test.ts extensions/shared/tool-call-timeout.test.ts",
+    "test": "node --test --experimental-strip-types extensions/workflows/artifacts.test.ts extensions/workflows/cancellation.test.ts extensions/workflows/controller.test.ts extensions/workflows/dashboard.test.ts extensions/workflows/drafts.test.ts extensions/workflows/limits.test.ts extensions/workflows/meta.test.ts extensions/workflows/model.test.ts extensions/workflows/prompt.test.ts extensions/workflows/runner.test.ts extensions/workflows/sandbox.test.ts extensions/workflows/serialization.test.ts extensions/shared/child-session.test.ts extensions/shared/context-utilization.test.ts extensions/shared/tool-call-timeout.test.ts",
     "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"*.{json,md}\"",
     "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"*.{json,md}\""
   },

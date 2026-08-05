@@ -36,6 +36,10 @@ import { Type, type Static } from "typebox";
 import { formatActivityStatus } from "../shared/activity-status.ts";
 import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
 import {
+  cancelActiveWorkflowRun,
+  type ActiveWorkflowRun,
+} from "./cancellation.ts";
+import {
   reconcileWorkflowStatus,
   RunController,
   WorkflowTerminationError,
@@ -45,6 +49,13 @@ import {
   sessionWorkflowRunIds,
   showWorkflowDashboard,
 } from "./dashboard.ts";
+import {
+  assertWorkflowDraftApproved,
+  assertWorkflowDraftArtifactMatches,
+  createWorkflowDraft,
+  loadWorkflowDraft,
+  type WorkflowDraft,
+} from "./drafts.ts";
 import { CapacityPool, hostCapacity, resolveWorkflowLimits } from "./limits.ts";
 import {
   extractMeta,
@@ -73,7 +84,7 @@ import {
 import {
   buildBackgroundWorkflowFollowUp,
   buildBackgroundWorkflowLaunchResult,
-  buildWorkflowAgentPrompt,
+  buildWorkflowDraftMessage,
   buildWorkflowResultMessage,
   WORKFLOW_PARAMETER_DESCRIPTIONS,
   WORKFLOW_PROMPT_GUIDELINES,
@@ -109,21 +120,47 @@ interface AgentCallOptions {
   effort?: unknown;
 }
 
-const WorkflowParams = Type.Object({
-  script: Type.String({
-    description: WORKFLOW_PARAMETER_DESCRIPTIONS.script,
-  }),
-  args: Type.Optional(
-    Type.String({
-      description: WORKFLOW_PARAMETER_DESCRIPTIONS.args,
-    }),
+const WorkflowParams = Type.Union([
+  Type.Object(
+    {
+      preview: Type.String({
+        minLength: 1,
+        description: WORKFLOW_PARAMETER_DESCRIPTIONS.preview,
+      }),
+      script: Type.String({
+        description: WORKFLOW_PARAMETER_DESCRIPTIONS.script,
+      }),
+      args: Type.Optional(
+        Type.String({
+          description: WORKFLOW_PARAMETER_DESCRIPTIONS.args,
+        }),
+      ),
+      background: Type.Optional(
+        Type.Boolean({
+          description: WORKFLOW_PARAMETER_DESCRIPTIONS.background,
+        }),
+      ),
+    },
+    { additionalProperties: false },
   ),
-  background: Type.Optional(
-    Type.Boolean({
-      description: WORKFLOW_PARAMETER_DESCRIPTIONS.background,
-    }),
+  Type.Object(
+    {
+      draftId: Type.String({
+        description: WORKFLOW_PARAMETER_DESCRIPTIONS.draftId,
+      }),
+    },
+    { additionalProperties: false },
   ),
-});
+]);
+
+const WorkflowCancelParams = Type.Object(
+  {
+    runId: Type.String({
+      description: WORKFLOW_PARAMETER_DESCRIPTIONS.runId,
+    }),
+  },
+  { additionalProperties: false },
+);
 
 type WorkflowInput = Static<typeof WorkflowParams>;
 
@@ -234,15 +271,15 @@ export default function workflows(pi: ExtensionAPI) {
   /** One extension-owned process-global pool shared by every run. */
   const sharedCapacity = new CapacityPool(hostCapacity());
 
+  /** Process-memory authority prevents artifact edits from changing approval. */
+  const pendingDrafts = new Map<string, WorkflowDraft>();
+  let userInputRevision = 0;
+  pi.on("input", (event) => {
+    if (event.source !== "extension") userInputRevision += 1;
+  });
+
   /** Live background runs, for /workflows and shutdown cleanup. */
-  const activeRuns = new Map<
-    string,
-    {
-      details: WorkflowDetails;
-      controller: RunController;
-      completion?: Promise<void>;
-    }
-  >();
+  const activeRuns = new Map<string, ActiveWorkflowRun>();
   const activeDetails = () =>
     new Map(
       [...activeRuns].map(([runId, run]) => [runId, run.details] as const),
@@ -366,6 +403,26 @@ export default function workflows(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "workflow_cancel",
+    label: "Cancel Workflow",
+    description:
+      "Cancel one exact active workflow run cleanly through its controller, wait for its agents and sandbox to settle, and report the persisted terminal status.",
+    parameters: WorkflowCancelParams,
+
+    async execute(_toolCallId, params) {
+      const details = await cancelActiveWorkflowRun(activeRuns, params.runId);
+      const message =
+        details.status === "aborted"
+          ? `Workflow ${params.runId} aborted cleanly.`
+          : `Workflow ${params.runId} settled as ${details.status}${details.error ? `: ${details.error}` : "."}`;
+      return {
+        content: [{ type: "text", text: message }],
+        details: compactToolDetails(details),
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "workflow",
     label: "Workflow",
     description: WORKFLOW_TOOL_DESCRIPTION,
@@ -374,19 +431,71 @@ export default function workflows(pi: ExtensionAPI) {
     parameters: WorkflowParams,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const workflowsDir = path.join(getAgentDir(), "workflows");
+      if ("script" in params) {
+        let prepared: ReturnType<typeof prepareWorkflowScript>;
+        try {
+          prepared = prepareWorkflowScript(params.script);
+        } catch (error) {
+          throw new Error(
+            `Workflow script failed to parse: ${errorText(error)}`,
+          );
+        }
+        const draft = createWorkflowDraft(workflowsDir, {
+          sessionId: ctx.sessionManager.getSessionId(),
+          cwd: ctx.cwd,
+          preparedAtUserInput: userInputRevision,
+          preview: params.preview,
+          script: params.script,
+          ...(params.args !== undefined ? { args: params.args } : {}),
+          background: params.background ?? false,
+        });
+        pendingDrafts.set(draft.draftId, draft);
+        const directory = path.join(workflowsDir, "drafts", draft.draftId);
+        return {
+          content: [
+            {
+              type: "text",
+              text: buildWorkflowDraftMessage({
+                draftId: draft.draftId,
+                preview: draft.preview,
+                meta: prepared.meta,
+                draftDir: directory,
+              }),
+            },
+          ],
+          details: undefined,
+        };
+      }
+
+      const draft = pendingDrafts.get(params.draftId);
+      if (!draft) {
+        throw new Error(
+          `Workflow draft ${params.draftId} is not pending in this session; prepare it again`,
+        );
+      }
+      const artifact = loadWorkflowDraft(workflowsDir, params.draftId);
+      assertWorkflowDraftArtifactMatches(draft, artifact);
+      assertWorkflowDraftApproved(draft, {
+        sessionId: ctx.sessionManager.getSessionId(),
+        cwd: ctx.cwd,
+        userInput: userInputRevision,
+      });
+      const script = draft.script;
+      const argsText = draft.args;
       let prepared: ReturnType<typeof prepareWorkflowScript>;
       try {
-        prepared = prepareWorkflowScript(params.script);
+        prepared = prepareWorkflowScript(script);
       } catch (error) {
         throw new Error(`Workflow script failed to parse: ${errorText(error)}`);
       }
 
       let args: unknown;
-      if (params.args !== undefined) {
+      if (argsText !== undefined) {
         try {
-          args = JSON.parse(params.args);
+          args = JSON.parse(argsText);
         } catch {
-          args = params.args;
+          args = argsText;
         }
       }
 
@@ -396,8 +505,8 @@ export default function workflows(pi: ExtensionAPI) {
         sharedCapacity.capacity,
       );
       const runId = `wf_${randomBytes(6).toString("hex")}`;
-      const runDir = path.join(getAgentDir(), "workflows", runId);
-      const background = (params.background ?? false) && ctx.hasUI;
+      const runDir = path.join(workflowsDir, runId);
+      const background = draft.background && ctx.hasUI;
 
       const details: WorkflowDetails = {
         runId,
@@ -432,9 +541,8 @@ export default function workflows(pi: ExtensionAPI) {
         details.termination = controller.terminationRecord;
       };
 
-      writeRunFile(runDir, "script.js", params.script);
-      if (params.args !== undefined)
-        writeRunFile(runDir, "args.json", params.args);
+      writeRunFile(runDir, "script.js", script);
+      if (argsText !== undefined) writeRunFile(runDir, "args.json", argsText);
       persistWorkflowJson(runDir, details);
       const persistence = createWorkflowPersistence(runDir, details);
 
@@ -529,11 +637,10 @@ export default function workflows(pi: ExtensionAPI) {
           return { ok: false, output: "", error };
         };
 
-        const prompt = buildWorkflowAgentPrompt(
+        const prompt =
           typeof promptValue === "string"
             ? promptValue
-            : String(promptValue ?? ""),
-        );
+            : String(promptValue ?? "");
         if (!prompt.trim())
           return fail("agent() requires a non-empty prompt string");
         if (controller.signal.aborted)
@@ -733,11 +840,7 @@ export default function workflows(pi: ExtensionAPI) {
 
       // Registered for /workflows visibility and session_shutdown abort;
       // blocking runs are watchable live from the dashboard too.
-      const activeRun = { details, controller } as {
-        details: WorkflowDetails;
-        controller: RunController;
-        completion?: Promise<void>;
-      };
+      const activeRun: ActiveWorkflowRun = { details, controller };
       activeRuns.set(runId, activeRun);
       const completion = runScript();
       activeRun.completion = completion;
@@ -807,14 +910,23 @@ export default function workflows(pi: ExtensionAPI) {
     },
 
     renderCall(args: Partial<WorkflowInput>, theme) {
+      if ("draftId" in args && typeof args.draftId === "string") {
+        return new Text(
+          theme.fg("toolTitle", theme.bold("workflow execute ")) +
+            theme.fg("accent", args.draftId),
+          0,
+          0,
+        );
+      }
+      const script = "script" in args ? args.script : undefined;
       const meta =
-        typeof args.script === "string"
-          ? extractMeta(args.script)
-          : { phases: [] };
+        typeof script === "string" ? extractMeta(script) : { phases: [] };
       let text =
-        theme.fg("toolTitle", theme.bold("workflow ")) +
+        theme.fg("toolTitle", theme.bold("workflow draft ")) +
         theme.fg("accent", (meta as WorkflowMeta).name ?? "(script)");
-      if (args.background) text += theme.fg("dim", " (background)");
+      if ("background" in args && args.background) {
+        text += theme.fg("dim", " (background)");
+      }
       const description = (meta as WorkflowMeta).description;
       if (description) text += `\n  ${theme.fg("dim", description)}`;
       for (const phase of meta.phases.slice(0, 8)) {
