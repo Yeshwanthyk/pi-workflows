@@ -29,6 +29,9 @@ test("workflow authoring guidance favors bounded non-overlapping parallelism", (
     guidance,
     /do not repeat the preview as separate assistant prose/,
   );
+  assert.match(guidance, /quoted string literals for static agent prompts/);
+  assert.match(guidance, /escape.*backticks.*template literals/i);
+  assert.match(guidance, /never reduce.*bare draft ID/i);
   assert.match(guidance, /one writer/);
   assert.match(guidance, /Independent approved drafts may run concurrently/);
 });
@@ -51,12 +54,14 @@ test("prepared draft output exposes the free-form preview without running", () =
       ],
       limits: { concurrency: 2, total: { outputTokens: 10_000 } },
     },
-    draftDir: "/tmp/draft",
+    artifactPath: "/tmp/draft/draft_123456789abc/draft.json",
   });
 
   assert.match(message, /no agents started/);
+  assert.match(message, /Ctrl\+O.*exact immutable script/);
+  assert.match(message, /draft\.json/);
   assert.match(message, /Scan parser and runner in parallel/);
   assert.match(message, /Scan — two independent read-only lanes/);
   assert.match(message, /outputTokens/);
-  assert.match(message, /only after a newer user response/);
+  assert.match(message, /newer, explicit user response/);
 });

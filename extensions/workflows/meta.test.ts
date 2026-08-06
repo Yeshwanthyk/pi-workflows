@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { extractMeta, prepareWorkflowScript } from "./meta.ts";
+import {
+  extractMeta,
+  formatWorkflowScriptParseError,
+  prepareWorkflowScript,
+} from "./meta.ts";
 
 test("metadata is decoded statically and removed from executable source", () => {
   const source = `export const meta = {
@@ -66,6 +70,28 @@ test("export-like text in strings, comments, regexes, and templates is untouched
   const prepared = prepareWorkflowScript(source);
   assert.equal(prepared.source, source);
   assert.deepEqual(prepared.meta, { phases: [] });
+});
+
+test("parse errors identify the source line and likely template-literal fix", () => {
+  const source = [
+    "phase('Write')",
+    "const result = await agent(`Update the `LOG.md` file.`)",
+    "return result",
+  ].join("\n");
+
+  let parseError: unknown;
+  try {
+    prepareWorkflowScript(source);
+  } catch (error) {
+    parseError = error;
+  }
+
+  const message = formatWorkflowScriptParseError(source, parseError);
+  assert.match(message, /Workflow script failed to parse/);
+  assert.match(message, /2 \| const result/);
+  assert.match(message, /\^/);
+  assert.match(message, /unescaped backtick/i);
+  assert.match(message, /quoted string/i);
 });
 
 test("executable and unsupported metadata fail closed", () => {

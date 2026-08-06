@@ -19,7 +19,7 @@ Reload an existing Pi session with `/reload`.
 - `/workflows` dashboard and run inspection
 - DSL primitives: `phase()`, `agent()`, `parallel()`, and `args`
 
-Drafts are written under `~/.pi/agent/workflows/drafts/<draftId>/`; run artifacts are written under `~/.pi/agent/workflows/<runId>/`. Multiple approved background workflows share a process-global capacity pool.
+Drafts are written under `~/.pi/agent/workflows/drafts/<draftId>/draft.json`; run artifacts are written under `~/.pi/agent/workflows/<runId>/`. Press `Ctrl+O` on a prepared draft result to review its preview, phases, limits, artifact path, and exact immutable script before approval. Multiple approved background workflows share a process-global capacity pool.
 
 ## Development
 

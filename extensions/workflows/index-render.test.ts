@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import {
+  initTheme,
+  type ExtensionAPI,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import workflows from "./index.ts";
+
+initTheme("dark");
 
 interface CapturedTool {
   name: string;
@@ -10,6 +16,11 @@ interface CapturedTool {
     args: Record<string, unknown>,
     theme: Theme,
     context: Record<string, unknown>,
+  ) => Component;
+  renderResult?: (
+    result: Record<string, unknown>,
+    options: { expanded: boolean },
+    theme: Theme,
   ) => Component;
 }
 
@@ -26,6 +37,7 @@ function captureWorkflowTool(): CapturedTool {
   workflows(pi);
   const tool = tools.find((candidate) => candidate.name === "workflow");
   assert.ok(tool?.renderCall);
+  assert.ok(tool.renderResult);
   return tool;
 }
 
@@ -59,6 +71,42 @@ test("streaming workflow drafts expose preview and save boundary", () => {
   assert.match(output, /draft saves when complete/);
   assert.match(output, /Preview/);
   assert.match(output, /Scan two independent seams/);
+});
+
+test("saved draft results provide compact review guidance and expanded exact source", () => {
+  const tool = captureWorkflowTool();
+  const script = "phase('Scan')\nreturn { ok: true }";
+  const result = {
+    content: [{ type: "text", text: "prepared" }],
+    details: {
+      kind: "draft",
+      draftId: "draft_123456789abc",
+      name: "reviewable-draft",
+      preview: "Scan safely, then report.",
+      script,
+      artifactPath: "/tmp/workflows/drafts/draft_123456789abc/draft.json",
+      background: true,
+      phases: [{ title: "Scan", detail: "read-only" }],
+      limits: { concurrency: 2 },
+    },
+  };
+
+  const collapsed = rendered(
+    tool.renderResult!(result, { expanded: false }, theme),
+  );
+  assert.match(collapsed, /workflow draft reviewable-draft/);
+  assert.match(collapsed, /no agents started/i);
+  assert.match(collapsed, /to review exact script/);
+  assert.match(collapsed, /draft_123456789abc/);
+
+  const expanded = rendered(
+    tool.renderResult!(result, { expanded: true }, theme),
+  );
+  assert.match(expanded, /Scan safely, then report/);
+  assert.match(expanded, /read-only/);
+  assert.match(expanded, /draft\.json/);
+  assert.match(expanded, /phase\('Scan'\)/);
+  assert.match(expanded, /return \{ ok: true \}/);
 });
 
 test("completed workflow calls leave the preview to the prepared result", () => {

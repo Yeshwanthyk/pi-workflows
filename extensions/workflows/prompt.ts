@@ -32,7 +32,7 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
   "• await agent(prompt, { label?, phase?, schema?, model?, provider?, effort? }) — run ONE subagent in an isolated context and wait for it. Always resolves to { ok, output, structured?, error? }. Check `ok` before using the result. When you pass a JSON `schema`, `structured` holds the validated object on success. `model`/`provider` override the session model; `effort` sets the thinking level (off|minimal|low|medium|high|xhigh|max). Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate or ask the user.",
   "• await parallel([() => agent(...), () => agent(...)], { concurrency? }) — run zero-argument agent thunks concurrently and return results in order. Omitted concurrency defaults to min(4, the run cap); explicit concurrency may use the resolved run cap. A process-global host pool remains authoritative.",
   "• args — the parsed value of the `args` tool parameter (or undefined).",
-  "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. A run may make at most 32 agent calls. Requested concurrency is clamped to the host hard capacity (min(16, max(1, availableParallelism - 2))); omission uses min(4, hard capacity). Optional metadata budgets bound workflow/agent wall and idle time plus total turns, output tokens, and cost. Configured output/cost budgets fail closed when finalized provider usage is missing or non-finite; finite zero is known usage. Each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly. Each individual child tool call times out independently after 3 minutes, becomes an error tool result, and leaves the agent loop free to recover. Use map/filter/if/await/template strings to orchestrate, and `return` a JSON-serializable aggregate.",
+  "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. A run may make at most 32 agent calls. Requested concurrency is clamped to the host hard capacity (min(16, max(1, availableParallelism - 2))); omission uses min(4, hard capacity). Optional metadata budgets bound workflow/agent wall and idle time plus total turns, output tokens, and cost. Configured output/cost budgets fail closed when finalized provider usage is missing or non-finite; finite zero is known usage. Each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly. Each individual child tool call times out independently after 3 minutes, becomes an error tool result, and leaves the agent loop free to recover. Use map/filter/if/await to orchestrate, prefer quoted strings for static prompts, reserve template literals for interpolation, and `return` a JSON-serializable aggregate.",
   "Pass a `schema` to agent() whenever a later step branches on the result, so you get typed fields instead of prose. There is no resume: a failed run is simply re-run. Artifacts are saved under ~/.pi/agent/workflows/<runId>/ for inspection.",
   "Example script for the preparation call:",
   "export const meta = { name: 'reliability-review', description: 'Review modules for reliability risks, then report', phases: [{ title: 'Scan' }, { title: 'Report' }] }",
@@ -43,7 +43,7 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
   "phase('Report')",
   "const report = await agent(`Summarize these findings: ${JSON.stringify(findings)}`, { label: 'report', phase: 'Report' })",
   "return { findings, report: report.ok ? report.output : report.error }",
-  "Submit that script with a preview to create a draft. After a newer user response approves it, execute with { draftId }.",
+  "Submit that script with a preview to create a draft. After preparation, surface the review instructions and preview instead of reducing the result to a bare draft ID. After a newer user response explicitly approves it, execute with { draftId }.",
 ].join("\n");
 
 /** Adds workflow orchestration primitives and background execution to the model's tool prompt. */
@@ -54,6 +54,8 @@ export const WORKFLOW_PROMPT_SNIPPET =
 export const WORKFLOW_PROMPT_GUIDELINES = [
   "Keep workflows proportional to the requested outcome. Use parallel branches only for independent bounded deliverables, give each branch distinct ownership, and avoid overlapping writes or repeated repository discovery.",
   "When preparing a workflow draft, emit the preview before the script in the workflow tool arguments and do not repeat the preview as separate assistant prose. Keep the immutable script compact so the preview appears immediately while source streams.",
+  "Use quoted string literals for static agent prompts. Reserve template literals for interpolation; escape Markdown backticks inside template literals as `\\`` or omit the code-span delimiters.",
+  "After a draft is prepared, show its preview and review instructions before requesting approval; never reduce the result to a bare draft ID.",
   "When implementation overlaps, prefer parallel read-only investigation followed by one writer. Pass concise findings forward instead of raw transcripts, and do not expand into later roadmap work.",
   "Use model/provider/effort intentionally. Prefer useful implementation and focused verification over reviewer swarms or exhaustive exploration.",
   "Independent approved drafts may run concurrently in background; the shared host pool bounds their aggregate concurrency.",
@@ -77,12 +79,13 @@ export function buildWorkflowDraftMessage(options: {
   draftId: string;
   preview: string;
   meta: WorkflowMeta;
-  draftDir: string;
+  artifactPath: string;
 }) {
   const lines = [
     `Workflow draft ${options.meta.name ? `"${options.meta.name}"` : options.draftId} prepared — no agents started.`,
     `Draft: ${options.draftId}`,
-    `Artifact: ${shortenHome(options.draftDir)}`,
+    `Artifact: ${shortenHome(options.artifactPath)}`,
+    "Review: press Ctrl+O to expand the tool result and inspect the exact immutable script.",
     "",
     "Preview:",
     options.preview,
@@ -96,7 +99,7 @@ export function buildWorkflowDraftMessage(options: {
   lines.push(
     "",
     `Configured limits: ${options.meta.limits ? JSON.stringify(options.meta.limits) : "unbounded"}`,
-    "This draft can execute only after a newer user response.",
+    "Approve only after reviewing it; execution requires a newer, explicit user response.",
   );
   return lines.join("\n");
 }

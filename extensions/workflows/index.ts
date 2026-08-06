@@ -59,6 +59,7 @@ import {
 import { CapacityPool, hostCapacity, resolveWorkflowLimits } from "./limits.ts";
 import {
   extractMeta,
+  formatWorkflowScriptParseError,
   prepareWorkflowScript,
   type WorkflowMeta,
 } from "./meta.ts";
@@ -163,6 +164,28 @@ const WorkflowCancelParams = Type.Object(
 );
 
 type WorkflowInput = Static<typeof WorkflowParams>;
+
+interface WorkflowDraftToolDetails {
+  kind: "draft";
+  draftId: string;
+  name?: string;
+  preview: string;
+  script: string;
+  artifactPath: string;
+  background: boolean;
+  phases: WorkflowMeta["phases"];
+  limits?: WorkflowMeta["limits"];
+}
+
+function isWorkflowDraftToolDetails(
+  value: unknown,
+): value is WorkflowDraftToolDetails {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    (value as { kind?: unknown }).kind === "draft"
+  );
+}
 
 function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(
@@ -437,9 +460,7 @@ export default function workflows(pi: ExtensionAPI) {
         try {
           prepared = prepareWorkflowScript(params.script);
         } catch (error) {
-          throw new Error(
-            `Workflow script failed to parse: ${errorText(error)}`,
-          );
+          throw new Error(formatWorkflowScriptParseError(params.script, error));
         }
         const draft = createWorkflowDraft(workflowsDir, {
           sessionId: ctx.sessionManager.getSessionId(),
@@ -452,6 +473,18 @@ export default function workflows(pi: ExtensionAPI) {
         });
         pendingDrafts.set(draft.draftId, draft);
         const directory = path.join(workflowsDir, "drafts", draft.draftId);
+        const artifactPath = path.join(directory, "draft.json");
+        const draftDetails: WorkflowDraftToolDetails = {
+          kind: "draft",
+          draftId: draft.draftId,
+          ...(prepared.meta.name ? { name: prepared.meta.name } : {}),
+          preview: draft.preview,
+          script: draft.script,
+          artifactPath,
+          background: draft.background,
+          phases: prepared.meta.phases,
+          ...(prepared.meta.limits ? { limits: prepared.meta.limits } : {}),
+        };
         return {
           content: [
             {
@@ -460,11 +493,11 @@ export default function workflows(pi: ExtensionAPI) {
                 draftId: draft.draftId,
                 preview: draft.preview,
                 meta: prepared.meta,
-                draftDir: directory,
+                artifactPath,
               }),
             },
           ],
-          details: undefined,
+          details: draftDetails,
         };
       }
 
@@ -487,7 +520,7 @@ export default function workflows(pi: ExtensionAPI) {
       try {
         prepared = prepareWorkflowScript(script);
       } catch (error) {
-        throw new Error(`Workflow script failed to parse: ${errorText(error)}`);
+        throw new Error(formatWorkflowScriptParseError(script, error));
       }
 
       let args: unknown;
@@ -964,7 +997,84 @@ export default function workflows(pi: ExtensionAPI) {
     },
 
     renderResult(result, { expanded }, theme) {
-      const details = result.details as WorkflowDetails | undefined;
+      const rawDetails = result.details as unknown;
+      if (isWorkflowDraftToolDetails(rawDetails)) {
+        const details = rawDetails;
+        const label = details.name ?? details.draftId;
+        const header =
+          `${theme.fg("success", SQUARE)} ${theme.fg("toolTitle", theme.bold("workflow draft "))}` +
+          `${theme.fg("accent", label)} ${theme.fg("success", "ready")}` +
+          (details.background ? theme.fg("dim", " (background)") : "");
+
+        if (!expanded) {
+          return new Text(
+            `${header}\n  ${theme.fg("dim", `${details.draftId} · no agents started`)}\n` +
+              theme.fg(
+                "muted",
+                `  (${keyHint("app.tools.expand", "to review exact script")})`,
+              ),
+            0,
+            0,
+          );
+        }
+
+        const container = new Container();
+        container.addChild(new Text(header, 0, 0));
+        container.addChild(
+          new Text(
+            theme.fg(
+              "dim",
+              `Draft: ${details.draftId}\nArtifact: ${details.artifactPath}\nNo agents started. Approve only after review.`,
+            ),
+            0,
+            0,
+          ),
+        );
+        container.addChild(new Spacer(1));
+        container.addChild(
+          new Text(theme.fg("muted", theme.bold("Preview")), 0, 0),
+        );
+        container.addChild(
+          new Markdown(details.preview, 0, 0, getMarkdownTheme()),
+        );
+        if (details.phases.length > 0) {
+          container.addChild(new Spacer(1));
+          container.addChild(
+            new Text(theme.fg("muted", theme.bold("Phases")), 0, 0),
+          );
+          for (const phase of details.phases) {
+            container.addChild(
+              new Text(
+                `  ${theme.fg("accent", phase.title)}${phase.detail ? theme.fg("dim", ` — ${phase.detail}`) : ""}`,
+                0,
+                0,
+              ),
+            );
+          }
+        }
+        container.addChild(
+          new Text(
+            theme.fg(
+              "dim",
+              `Configured limits: ${details.limits ? JSON.stringify(details.limits) : "unbounded"}`,
+            ),
+            0,
+            0,
+          ),
+        );
+        container.addChild(new Spacer(1));
+        container.addChild(
+          new Text(
+            theme.fg("muted", theme.bold("Exact immutable script")),
+            0,
+            0,
+          ),
+        );
+        container.addChild(new Text(details.script, 2, 0));
+        return container;
+      }
+
+      const details = rawDetails as WorkflowDetails | undefined;
       if (!details) {
         const first = result.content[0];
         return new Text(

@@ -40,6 +40,41 @@ function parseProgram(source: string): Program {
   });
 }
 
+/** Add a bounded source frame and authoring guidance to an Acorn parse error. */
+export function formatWorkflowScriptParseError(
+  source: string,
+  error: unknown,
+): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const location = (error as { loc?: { line?: unknown; column?: unknown } })
+    ?.loc;
+  const lineNumber = location?.line;
+  const column = location?.column;
+  let frame = "";
+
+  if (
+    typeof lineNumber === "number" &&
+    Number.isSafeInteger(lineNumber) &&
+    lineNumber > 0 &&
+    typeof column === "number" &&
+    Number.isSafeInteger(column) &&
+    column >= 0
+  ) {
+    const sourceLine = source.split(/\r?\n/)[lineNumber - 1] ?? "";
+    const normalized = sourceLine.replace(/\t/g, "  ");
+    const start = Math.max(0, column - 100);
+    const excerpt = normalized.slice(start, start + 240);
+    const caretColumn = Math.max(0, Math.min(column - start, excerpt.length));
+    const prefix = `${lineNumber} | `;
+    frame = `\n${prefix}${excerpt}\n${" ".repeat(prefix.length + caretColumn)}^`;
+  }
+
+  return (
+    `Workflow script failed to parse: ${message}${frame}\n` +
+    "Hint: check agent prompts for an unescaped backtick. Use quoted string literals for static prompts; inside template literals, escape Markdown backticks as \\`."
+  ).slice(0, 16 * 1024);
+}
+
 function isIdentifier(node: Expression, name?: string): node is Identifier {
   return (
     node.type === "Identifier" && (name === undefined || node.name === name)
