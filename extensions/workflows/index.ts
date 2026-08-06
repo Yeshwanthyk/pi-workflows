@@ -56,6 +56,7 @@ import {
   loadWorkflowDraft,
   type WorkflowDraft,
 } from "./drafts.ts";
+import { showWorkflowDraftReview } from "./draft-review.ts";
 import { CapacityPool, hostCapacity, resolveWorkflowLimits } from "./limits.ts";
 import {
   extractMeta,
@@ -374,6 +375,75 @@ export default function workflows(pi: ExtensionAPI) {
     }
     lastUi?.setStatus("workflows", undefined);
     lastUi = undefined;
+  });
+
+  pi.registerCommand("workflow-draft", {
+    description: "Review a pending workflow draft and its exact source",
+    getArgumentCompletions: (prefix) => {
+      const matches = [...pendingDrafts.values()]
+        .filter((draft) => draft.draftId.startsWith(prefix))
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map((draft) => ({
+          value: draft.draftId,
+          label: draft.draftId,
+          description: draft.preview.split("\n", 1)[0],
+        }));
+      return matches.length > 0 ? matches : null;
+    },
+    handler: async (rawArgs, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify(
+          "Workflow draft review requires interactive mode.",
+          "warning",
+        );
+        return;
+      }
+      const query = rawArgs.trim();
+      const available = [...pendingDrafts.values()]
+        .filter(
+          (draft) =>
+            draft.sessionId === ctx.sessionManager.getSessionId() &&
+            draft.cwd === ctx.cwd,
+        )
+        .sort((a, b) => b.createdAt - a.createdAt);
+      const matches = query
+        ? available.filter(
+            (draft) => draft.draftId === query || draft.draftId.endsWith(query),
+          )
+        : available.slice(0, 1);
+      if (matches.length === 0) {
+        ctx.ui.notify(
+          query
+            ? `No pending workflow draft matching "${query}".`
+            : "No pending workflow drafts in this session.",
+          "warning",
+        );
+        return;
+      }
+      if (matches.length > 1) {
+        ctx.ui.notify(`Multiple pending drafts match "${query}".`, "warning");
+        return;
+      }
+      const draft = matches[0]!;
+      let prepared: ReturnType<typeof prepareWorkflowScript>;
+      try {
+        prepared = prepareWorkflowScript(draft.script);
+      } catch (error) {
+        ctx.ui.notify(
+          formatWorkflowScriptParseError(draft.script, error),
+          "error",
+        );
+        return;
+      }
+      const artifactPath = path.join(
+        getAgentDir(),
+        "workflows",
+        "drafts",
+        draft.draftId,
+        "draft.json",
+      );
+      await showWorkflowDraftReview(ctx, draft, prepared.meta, artifactPath);
+    },
   });
 
   pi.registerCommand("workflows", {
@@ -1011,7 +1081,7 @@ export default function workflows(pi: ExtensionAPI) {
             `${header}\n  ${theme.fg("dim", `${details.draftId} · no agents started`)}\n` +
               theme.fg(
                 "muted",
-                `  (${keyHint("app.tools.expand", "to review exact script")})`,
+                `  /workflow-draft ${details.draftId} · inspect plan and exact source`,
               ),
             0,
             0,
@@ -1065,12 +1135,16 @@ export default function workflows(pi: ExtensionAPI) {
         container.addChild(new Spacer(1));
         container.addChild(
           new Text(
-            theme.fg("muted", theme.bold("Exact immutable script")),
+            `${theme.fg("muted", theme.bold("Review inspector"))}\n` +
+              `  /workflow-draft ${details.draftId}\n` +
+              theme.fg(
+                "dim",
+                "  Opens the plan and exact immutable source side by side.",
+              ),
             0,
             0,
           ),
         );
-        container.addChild(new Text(details.script, 2, 0));
         return container;
       }
 

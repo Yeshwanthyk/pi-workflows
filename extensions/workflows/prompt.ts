@@ -85,7 +85,7 @@ export function buildWorkflowDraftMessage(options: {
     `Workflow draft ${options.meta.name ? `"${options.meta.name}"` : options.draftId} prepared — no agents started.`,
     `Draft: ${options.draftId}`,
     `Artifact: ${shortenHome(options.artifactPath)}`,
-    "Review: press Ctrl+O to expand the tool result and inspect the exact immutable script.",
+    `Review: run /workflow-draft ${options.draftId} to inspect the plan and exact immutable source.`,
     "",
     "Preview:",
     options.preview,

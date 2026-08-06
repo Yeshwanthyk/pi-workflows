@@ -73,7 +73,7 @@ test("streaming workflow drafts expose preview and save boundary", () => {
   assert.match(output, /Scan two independent seams/);
 });
 
-test("saved draft results provide compact review guidance and expanded exact source", () => {
+test("saved draft results route exact-source review to the draft inspector", () => {
   const tool = captureWorkflowTool();
   const script = "phase('Scan')\nreturn { ok: true }";
   const result = {
@@ -96,8 +96,8 @@ test("saved draft results provide compact review guidance and expanded exact sou
   );
   assert.match(collapsed, /workflow draft reviewable-draft/);
   assert.match(collapsed, /no agents started/i);
-  assert.match(collapsed, /to review exact script/);
-  assert.match(collapsed, /draft_123456789abc/);
+  assert.match(collapsed, /\/workflow-draft draft_123456789abc/);
+  assert.match(collapsed, /inspect plan and exact source/);
 
   const expanded = rendered(
     tool.renderResult!(result, { expanded: true }, theme),
@@ -105,8 +105,10 @@ test("saved draft results provide compact review guidance and expanded exact sou
   assert.match(expanded, /Scan safely, then report/);
   assert.match(expanded, /read-only/);
   assert.match(expanded, /draft\.json/);
-  assert.match(expanded, /phase\('Scan'\)/);
-  assert.match(expanded, /return \{ ok: true \}/);
+  assert.match(expanded, /Review inspector/);
+  assert.match(expanded, /\/workflow-draft draft_123456789abc/);
+  assert.doesNotMatch(expanded, /phase\('Scan'\)/);
+  assert.doesNotMatch(expanded, /return \{ ok: true \}/);
 });
 
 test("completed workflow calls leave the preview to the prepared result", () => {

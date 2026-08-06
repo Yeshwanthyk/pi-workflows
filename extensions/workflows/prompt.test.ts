@@ -71,7 +71,8 @@ test("prepared draft output exposes the free-form preview without running", () =
   });
 
   assert.match(message, /no agents started/);
-  assert.match(message, /Ctrl\+O.*exact immutable script/);
+  assert.match(message, /\/workflow-draft draft_123456789abc/);
+  assert.match(message, /exact immutable source/);
   assert.match(message, /draft\.json/);
   assert.match(message, /Scan parser and runner in parallel/);
   assert.match(message, /Scan — two independent read-only lanes/);
