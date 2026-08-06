@@ -32,7 +32,7 @@ async function withTempDir(run: (directory: string) => Promise<void>) {
   }
 }
 
-test("child denylist keeps extension and workflow structured tools available", async () => {
+test("child denylist keeps execution tools while removing orchestration tools", async () => {
   await withTempDir(async (directory) => {
     let starts = 0;
     let shutdowns = 0;
@@ -107,6 +107,14 @@ test("child denylist keeps extension and workflow structured tools available", a
         "workflow",
         "workflow_cancel",
         "ask_user",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskList",
+        "TaskGet",
+        "TaskClaim",
+        "TaskExecute",
+        "TaskOutput",
+        "TaskStop",
       ],
     );
     const allTools = new Set(session.getAllTools().map((tool) => tool.name));

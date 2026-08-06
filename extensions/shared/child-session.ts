@@ -20,6 +20,14 @@ export const CHILD_EXCLUDED_TOOL_NAMES = [
   "workflow",
   "workflow_cancel",
   "ask_user",
+  "TaskCreate",
+  "TaskUpdate",
+  "TaskList",
+  "TaskGet",
+  "TaskClaim",
+  "TaskExecute",
+  "TaskOutput",
+  "TaskStop",
 ] as const;
 
 /** Fresh SDK options avoid turning the denylist into an accidental allowlist. */

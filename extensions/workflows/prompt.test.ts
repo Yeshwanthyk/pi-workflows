@@ -7,23 +7,37 @@ import {
   WORKFLOW_TOOL_DESCRIPTION,
 } from "./prompt.ts";
 
-test("workflow children receive shared scope guidance before their assignment", () => {
+test("workflow children execute their assigned outcome without replanning", () => {
   const prompt = buildWorkflowAgentPrompt(
     "Inspect only src/parser.ts and return the parsing seam.",
   );
 
-  assert.match(prompt, /Own only the assigned workflow lane/);
+  assert.match(prompt, /workflow already owns decomposition and coordination/i);
+  assert.match(prompt, /assigned outcome and its focused proof/i);
+  assert.match(prompt, /without creating another plan/i);
+  assert.match(prompt, /consult referenced reports or artifacts/i);
   assert.match(prompt, /Reuse existing project patterns/);
   assert.match(prompt, /avoid duplicating other agents/);
   assert.match(prompt, /do not expand into later roadmap work/);
   assert.match(prompt, /Assigned workflow step:\nInspect only src\/parser\.ts/);
 });
 
-test("workflow authoring guidance favors bounded non-overlapping parallelism", () => {
+test("workflow authoring guidance favors complete outcomes in fresh agents", () => {
   const guidance = WORKFLOW_PROMPT_GUIDELINES.join("\n");
 
+  assert.match(guidance, /workflow draft owns decomposition/i);
+  assert.match(guidance, /one agent for a naturally bounded outcome/i);
+  assert.match(guidance, /few sequential fresh agents/i);
   assert.match(guidance, /parallel branches only for independent bounded/);
-  assert.match(guidance, /avoid overlapping writes/);
+  assert.match(guidance, /avoid concurrent writes/);
+  assert.match(guidance, /complete outcome with focused proof/i);
+  assert.match(guidance, /relevant report or artifact paths/i);
+  assert.match(
+    guidance,
+    /instead of packing the whole change into one writer/i,
+  );
+  assert.match(guidance, /one integration\/proof agent/i);
+  assert.match(guidance, /checks the complete result/i);
   assert.match(guidance, /emit the preview before the script/);
   assert.match(
     guidance,
@@ -32,7 +46,6 @@ test("workflow authoring guidance favors bounded non-overlapping parallelism", (
   assert.match(guidance, /quoted string literals for static agent prompts/);
   assert.match(guidance, /escape.*backticks.*template literals/i);
   assert.match(guidance, /never reduce.*bare draft ID/i);
-  assert.match(guidance, /one writer/);
   assert.match(guidance, /Independent approved drafts may run concurrently/);
 });
 
