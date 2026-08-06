@@ -24,6 +24,11 @@ test("workflow authoring guidance favors bounded non-overlapping parallelism", (
 
   assert.match(guidance, /parallel branches only for independent bounded/);
   assert.match(guidance, /avoid overlapping writes/);
+  assert.match(guidance, /emit the preview before the script/);
+  assert.match(
+    guidance,
+    /do not repeat the preview as separate assistant prose/,
+  );
   assert.match(guidance, /one writer/);
   assert.match(guidance, /Independent approved drafts may run concurrently/);
 });

@@ -909,23 +909,48 @@ export default function workflows(pi: ExtensionAPI) {
       };
     },
 
-    renderCall(args: Partial<WorkflowInput>, theme) {
+    renderCall(args: Partial<WorkflowInput>, theme, context) {
+      const component =
+        (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       if ("draftId" in args && typeof args.draftId === "string") {
-        return new Text(
+        component.setText(
           theme.fg("toolTitle", theme.bold("workflow execute ")) +
             theme.fg("accent", args.draftId),
-          0,
-          0,
         );
+        return component;
       }
       const script = "script" in args ? args.script : undefined;
       const meta =
         typeof script === "string" ? extractMeta(script) : { phases: [] };
       let text =
         theme.fg("toolTitle", theme.bold("workflow draft ")) +
-        theme.fg("accent", (meta as WorkflowMeta).name ?? "(script)");
+        theme.fg(
+          "accent",
+          (meta as WorkflowMeta).name ??
+            (context.argsComplete ? "(script)" : "preparing…"),
+        );
       if ("background" in args && args.background) {
         text += theme.fg("dim", " (background)");
+      }
+      if (!context.argsComplete) {
+        const received =
+          typeof script === "string"
+            ? ` · ${script.length.toLocaleString("en-US")} chars received`
+            : "";
+        text += `\n  ${theme.fg("muted", "Preparing immutable script")}${theme.fg(
+          "dim",
+          `${received} · draft saves when complete`,
+        )}`;
+        const preview =
+          "preview" in args && typeof args.preview === "string"
+            ? args.preview.trim()
+            : "";
+        if (preview) {
+          text += `\n\n${theme.fg("muted", theme.bold("Preview"))}\n${theme.fg(
+            "toolOutput",
+            preview,
+          )}`;
+        }
       }
       const description = (meta as WorkflowMeta).description;
       if (description) text += `\n  ${theme.fg("dim", description)}`;
@@ -934,7 +959,8 @@ export default function workflows(pi: ExtensionAPI) {
           phase.detail ? theme.fg("dim", ` — ${phase.detail}`) : ""
         }`;
       }
-      return new Text(text, 0, 0);
+      component.setText(text);
+      return component;
     },
 
     renderResult(result, { expanded }, theme) {

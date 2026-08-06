@@ -53,6 +53,7 @@ export const WORKFLOW_PROMPT_SNIPPET =
 /** Guides the model toward proportional, non-overlapping workflow ownership. */
 export const WORKFLOW_PROMPT_GUIDELINES = [
   "Keep workflows proportional to the requested outcome. Use parallel branches only for independent bounded deliverables, give each branch distinct ownership, and avoid overlapping writes or repeated repository discovery.",
+  "When preparing a workflow draft, emit the preview before the script in the workflow tool arguments and do not repeat the preview as separate assistant prose. Keep the immutable script compact so the preview appears immediately while source streams.",
   "When implementation overlaps, prefer parallel read-only investigation followed by one writer. Pass concise findings forward instead of raw transcripts, and do not expand into later roadmap work.",
   "Use model/provider/effort intentionally. Prefer useful implementation and focused verification over reviewer swarms or exhaustive exploration.",
   "Independent approved drafts may run concurrently in background; the shared host pool bounds their aggregate concurrency.",
