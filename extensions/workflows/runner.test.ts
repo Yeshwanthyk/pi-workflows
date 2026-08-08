@@ -18,6 +18,7 @@ import {
   recordToolExecutionTiming,
   runAgent,
   transcriptFromMessages,
+  type AgentProgress,
   type ToolExecutionTiming,
 } from "./runner.ts";
 import type { AgentUsage } from "./model.ts";
@@ -560,6 +561,99 @@ test("runAgent omits structured output after an abort", async () => {
   assert.equal(outcome.ok, false);
   assert.equal(outcome.aborted, true);
   assert.equal("structured" in outcome, false);
+});
+
+test("runAgent progress exposes live tool activity and completion counts", async () => {
+  const settingsManager = SettingsManager.inMemory();
+  const loader = new DefaultResourceLoader({
+    cwd: process.cwd(),
+    agentDir: process.cwd(),
+    settingsManager,
+  });
+  const modelRegistry = ModelRegistry.inMemory(AuthStorage.inMemory());
+  const progress: AgentProgress[] = [];
+  let listener: AgentSessionEventListener | undefined;
+
+  const outcome = await runAgent({
+    prompt: "inspect",
+    cwd: process.cwd(),
+    loader,
+    settingsManager,
+    modelRegistry,
+    onProgress: (next) => progress.push(next),
+    createSession: async () => {
+      const messages: AgentSession["messages"] = [];
+      const session = {
+        messages,
+        model: undefined,
+        bindExtensions: async () => {},
+        getAllTools: () => [],
+        getToolDefinition: () => undefined,
+        subscribe: (next: AgentSessionEventListener) => {
+          listener = next;
+          return () => {
+            listener = undefined;
+          };
+        },
+        getContextUsage: () => undefined,
+        prompt: async () => {
+          listener?.({
+            type: "tool_execution_start",
+            toolCallId: "tool-1",
+            toolName: "bash",
+            args: { command: "npm test" },
+          });
+          listener?.({
+            type: "tool_execution_update",
+            toolCallId: "tool-1",
+            toolName: "bash",
+            args: { command: "npm test" },
+            partialResult: { content: [{ type: "text", text: "running" }] },
+          });
+          listener?.({
+            type: "tool_execution_end",
+            toolCallId: "tool-1",
+            toolName: "bash",
+            result: { content: [{ type: "text", text: "passed" }] },
+            isError: false,
+          });
+          const message = {
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: "done" }],
+            api: "openai-responses" as const,
+            provider: "fixture",
+            model: "fixture",
+            usage: zeroUsage,
+            stopReason: "stop" as const,
+            timestamp: Date.now(),
+          };
+          messages.push(message);
+          listener?.({ type: "message_start", message });
+          listener?.({ type: "message_end", message });
+        },
+        abort: async () => {},
+        extensionRunner: { hasHandlers: () => false, emit: async () => {} },
+        dispose: () => {},
+      } as unknown as AgentSession;
+      return { session };
+    },
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.ok(
+    progress.some(
+      (entry) =>
+        entry.currentTools[0]?.name === "bash" &&
+        entry.currentTools[0]?.argsPreview?.includes("npm test"),
+    ),
+  );
+  assert.ok(
+    progress.some((entry) =>
+      entry.currentTools[0]?.outputPreview?.includes("running"),
+    ),
+  );
+  assert.equal(progress.at(-1)?.currentTools.length, 0);
+  assert.equal(progress.at(-1)?.completedOperations, 1);
 });
 
 test("runAgent upgrades orderly teardown when cancellation races it", async () => {

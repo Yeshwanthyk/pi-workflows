@@ -119,6 +119,15 @@ export interface TranscriptEntry {
   durationMs?: number;
 }
 
+export interface AgentToolActivity {
+  toolCallId: string;
+  name: string;
+  argsPreview?: string;
+  outputPreview?: string;
+  startedAt: number;
+  updatedAt: number;
+}
+
 export interface AgentRecord {
   index: number;
   label: string;
@@ -130,6 +139,11 @@ export interface AgentRecord {
   /** Context capacity of the active model used for this agent. */
   contextWindow?: number;
   queuedAt: number;
+  /** Latest meaningful child lifecycle, model, or tool event. */
+  lastActivityAt?: number;
+  /** Tools executing in the child right now. */
+  currentTools?: AgentToolActivity[];
+  completedOperations?: number;
   /** Set only after per-run and process-global capacity are acquired. */
   startedAt?: number;
   finishedAt?: number;

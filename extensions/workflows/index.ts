@@ -27,7 +27,6 @@ import * as path from "node:path";
 import {
   getAgentDir,
   getMarkdownTheme,
-  keyHint,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -101,6 +100,11 @@ import {
 } from "./runner.ts";
 import { runWorkflowSandbox } from "./sandbox.ts";
 import { safeStringify, writeFileAtomic } from "./serialization.ts";
+import {
+  ACTIVE_WORK_CHANNELS,
+  workflowActiveWorkItem,
+} from "./activity-protocol.ts";
+import { renderWorkflowActivityCard } from "./activity-card.ts";
 
 const PREVIEW_LENGTH = 200;
 const EMIT_INTERVAL_MS = 120;
@@ -304,10 +308,62 @@ export default function workflows(pi: ExtensionAPI) {
 
   /** Live background runs, for /workflows and shutdown cleanup. */
   const activeRuns = new Map<string, ActiveWorkflowRun>();
+  /** Recently settled background details keep their originating card accurate. */
+  const finishedDetails = new Map<string, WorkflowDetails>();
+  const toolRowInvalidators = new Map<
+    string,
+    { runId: string; invalidate: () => void }
+  >();
+  let activityTick: ReturnType<typeof setInterval> | undefined;
   const activeDetails = () =>
     new Map(
       [...activeRuns].map(([runId, run]) => [runId, run.details] as const),
     );
+
+  const invalidateRun = (runId: string) => {
+    for (const row of toolRowInvalidators.values()) {
+      if (row.runId !== runId) continue;
+      try {
+        row.invalidate();
+      } catch {
+        // A historical row can disappear during branch/session changes.
+      }
+    }
+  };
+
+  const publishWorkflowActivity = (details: WorkflowDetails) => {
+    const item = workflowActiveWorkItem(details);
+    if (item) pi.events.emit(ACTIVE_WORK_CHANNELS.update, item);
+    else {
+      pi.events.emit(ACTIVE_WORK_CHANNELS.remove, {
+        version: 1,
+        key: `workflow:${details.runId}`,
+      });
+    }
+    invalidateRun(details.runId);
+  };
+
+  const rememberFinished = (details: WorkflowDetails) => {
+    finishedDetails.set(details.runId, compactToolDetails(details));
+    while (finishedDetails.size > 64) {
+      const oldest = finishedDetails.keys().next().value;
+      if (typeof oldest !== "string") break;
+      finishedDetails.delete(oldest);
+    }
+    publishWorkflowActivity(details);
+  };
+
+  const syncActivityTick = () => {
+    if (activeRuns.size > 0 && !activityTick) {
+      activityTick = setInterval(() => {
+        for (const runId of activeRuns.keys()) invalidateRun(runId);
+      }, 1_000);
+      activityTick.unref?.();
+    } else if (activeRuns.size === 0 && activityTick) {
+      clearInterval(activityTick);
+      activityTick = undefined;
+    }
+  };
 
   /** Finished counts remain visible until the dashboard acknowledges them. */
   let lastUi: ExtensionContext["ui"] | undefined;
@@ -318,6 +374,7 @@ export default function workflows(pi: ExtensionAPI) {
     if (!ui) return;
     try {
       const running = activeRuns.size;
+      syncActivityTick();
       if (running === 0 && completedRuns === 0 && failedRuns === 0) {
         ui.setStatus("workflows", undefined);
         return;
@@ -372,6 +429,15 @@ export default function workflows(pi: ExtensionAPI) {
       });
       await Promise.race([Promise.allSettled(completions), timeout]);
       if (timer) clearTimeout(timer);
+    }
+    if (activityTick) clearInterval(activityTick);
+    activityTick = undefined;
+    toolRowInvalidators.clear();
+    for (const run of runs) {
+      pi.events.emit(ACTIVE_WORK_CHANNELS.remove, {
+        version: 1,
+        key: `workflow:${run.details.runId}`,
+      });
     }
     lastUi?.setStatus("workflows", undefined);
     lastUi = undefined;
@@ -666,6 +732,7 @@ export default function workflows(pi: ExtensionAPI) {
       const flush = () => {
         emitTimer = undefined;
         lastEmit = Date.now();
+        publishWorkflowActivity(details);
         if (background) return;
         onUpdate?.({
           content: [{ type: "text", text: summaryLine(details) }],
@@ -711,6 +778,7 @@ export default function workflows(pi: ExtensionAPI) {
             ? opts.label.trim().slice(0, 160)
             : `agent-${index}`;
 
+        const queuedAt = Date.now();
         const record: AgentRecord = {
           index,
           label,
@@ -721,7 +789,10 @@ export default function workflows(pi: ExtensionAPI) {
           state: "queued",
           model: ctx.model?.id,
           contextWindow: ctx.model?.contextWindow,
-          queuedAt: Date.now(),
+          queuedAt,
+          lastActivityAt: queuedAt,
+          currentTools: [],
+          completedOperations: 0,
           preview: "",
           usage: emptyUsage(),
           transcript: [],
@@ -735,6 +806,8 @@ export default function workflows(pi: ExtensionAPI) {
             record.state = "error";
             record.error = error;
             record.finishedAt ??= Date.now();
+            record.lastActivityAt = record.finishedAt;
+            record.currentTools = [];
             emit();
           });
           return { ok: false, output: "", error };
@@ -819,7 +892,13 @@ export default function workflows(pi: ExtensionAPI) {
                 settingsManager: resources.settingsManager,
                 modelRegistry: ctx.modelRegistry,
                 signal: runSignal,
-                onActivity: runtime.activity,
+                onActivity: () => {
+                  runtime.activity();
+                  controller.taskUpdate(() => {
+                    record.lastActivityAt = Date.now();
+                    emit(false);
+                  });
+                },
                 onTurnStart: runtime.reserveTurn,
                 onUsage: runtime.reportUsage,
                 onProgress: (progress) => {
@@ -830,6 +909,9 @@ export default function workflows(pi: ExtensionAPI) {
                     record.contextWindow =
                       progress.contextWindow ?? record.contextWindow;
                     record.transcript = progress.transcript;
+                    record.lastActivityAt = progress.lastActivityAt;
+                    record.currentTools = progress.currentTools;
+                    record.completedOperations = progress.completedOperations;
                     emit();
                   });
                 },
@@ -846,6 +928,8 @@ export default function workflows(pi: ExtensionAPI) {
                   PREVIEW_LENGTH,
                 );
                 record.finishedAt ??= Date.now();
+                record.lastActivityAt = record.finishedAt;
+                record.currentTools = [];
                 record.state = outcome.ok ? "done" : "error";
                 if (outcome.ok) {
                   delete record.error;
@@ -873,12 +957,15 @@ export default function workflows(pi: ExtensionAPI) {
                 controller.taskUpdate(() => {
                   record.state = "running";
                   record.startedAt = Date.now();
+                  record.lastActivityAt = record.startedAt;
                   emit();
                 });
               },
               onFinished: () => {
                 controller.taskUpdate(() => {
                   record.finishedAt ??= Date.now();
+                  record.lastActivityAt = record.finishedAt;
+                  record.currentTools = [];
                 });
               },
             },
@@ -926,6 +1013,8 @@ export default function workflows(pi: ExtensionAPI) {
           record.error =
             record.error ?? "Agent did not settle before run cleanup";
           record.finishedAt ??= Date.now();
+          record.lastActivityAt = record.finishedAt;
+          record.currentTools = [];
         }
         details.status = status;
         details.finishedAt = Date.now();
@@ -945,6 +1034,7 @@ export default function workflows(pi: ExtensionAPI) {
       // blocking runs are watchable live from the dashboard too.
       const activeRun: ActiveWorkflowRun = { details, controller };
       activeRuns.set(runId, activeRun);
+      publishWorkflowActivity(details);
       const completion = runScript();
       activeRun.completion = completion;
       if (ctx.hasUI) lastUi = ctx.ui;
@@ -959,6 +1049,7 @@ export default function workflows(pi: ExtensionAPI) {
           })
           .finally(() => {
             activeRuns.delete(runId);
+            rememberFinished(details);
             recordSettledRun(details.status);
             updateIndicator();
             try {
@@ -993,6 +1084,7 @@ export default function workflows(pi: ExtensionAPI) {
         await completion;
       } finally {
         activeRuns.delete(runId);
+        rememberFinished(details);
         recordSettledRun(details.status);
         updateIndicator();
       }
@@ -1066,7 +1158,7 @@ export default function workflows(pi: ExtensionAPI) {
       return component;
     },
 
-    renderResult(result, { expanded }, theme) {
+    renderResult(result, { expanded }, theme, context) {
       const rawDetails = result.details as unknown;
       if (isWorkflowDraftToolDetails(rawDetails)) {
         const details = rawDetails;
@@ -1148,7 +1240,7 @@ export default function workflows(pi: ExtensionAPI) {
         return container;
       }
 
-      const details = rawDetails as WorkflowDetails | undefined;
+      let details = rawDetails as WorkflowDetails | undefined;
       if (!details) {
         const first = result.content[0];
         return new Text(
@@ -1157,6 +1249,20 @@ export default function workflows(pi: ExtensionAPI) {
           0,
         );
       }
+
+      toolRowInvalidators.set(context.toolCallId, {
+        runId: details.runId,
+        invalidate: context.invalidate,
+      });
+      while (toolRowInvalidators.size > 128) {
+        const oldest = toolRowInvalidators.keys().next().value;
+        if (typeof oldest !== "string") break;
+        toolRowInvalidators.delete(oldest);
+      }
+      details =
+        activeRuns.get(details.runId)?.details ??
+        finishedDetails.get(details.runId) ??
+        details;
 
       const { failed } = countStates(details);
       const lifecycle = formatAgentLifecycle(details);
@@ -1174,21 +1280,7 @@ export default function workflows(pi: ExtensionAPI) {
       const totals = formatUsage(aggregateUsage(details.agents));
 
       if (!expanded) {
-        let text = header;
-        for (const agent of details.agents) {
-          const context = agentContext(agent);
-          text += `\n  ${stateSquare(agent.state, theme)} ${theme.fg("accent", agent.label)}${
-            agent.phase ? theme.fg("dim", ` (${agent.phase})`) : ""
-          }${theme.fg(
-            "dim",
-            `${context ? ` · ${context}` : ""} · ${formatElapsed(agent.startedAt, agent.finishedAt)}`,
-          )}`;
-        }
-        if (totals) text += `\n  ${theme.fg("dim", `Total: ${totals}`)}`;
-        if (details.error)
-          text += `\n  ${theme.fg("error", `Error: ${details.error}`)}`;
-        text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
-        return new Text(text, 0, 0);
+        return new Text(renderWorkflowActivityCard(details, theme), 0, 0);
       }
 
       const container = new Container();

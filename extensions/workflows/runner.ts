@@ -31,7 +31,12 @@ import {
   shutdownAndDisposeChildSession,
 } from "../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
-import { emptyUsage, type AgentUsage, type TranscriptEntry } from "./model.ts";
+import {
+  emptyUsage,
+  type AgentToolActivity,
+  type AgentUsage,
+  type TranscriptEntry,
+} from "./model.ts";
 import {
   buildWorkflowAgentPrompt,
   STRUCTURED_OUTPUT_RECOVERY_PROMPT,
@@ -81,6 +86,9 @@ export interface AgentProgress {
   model?: string;
   contextWindow?: number;
   transcript: TranscriptEntry[];
+  lastActivityAt: number;
+  currentTools: AgentToolActivity[];
+  completedOperations: number;
 }
 
 type AgentSessionFactory = (
@@ -635,6 +643,20 @@ export async function runAgent(
   let stopReason: string | undefined;
   let errorMessage: string | undefined;
   const toolTimings = new Map<string, ToolExecutionTiming>();
+  const currentToolMap = new Map<string, AgentToolActivity>();
+  let completedOperations = 0;
+  let lastActivityAt = Date.now();
+
+  const progressSnapshot = (): AgentProgress => ({
+    preview: finalOutput(childSession.messages),
+    usage: { ...usage },
+    model: modelId,
+    contextWindow,
+    transcript: transcriptFromMessages(childSession.messages, toolTimings),
+    lastActivityAt,
+    currentTools: [...currentToolMap.values()],
+    completedOperations,
+  });
 
   const sync = () => {
     const messages = childSession.messages;
@@ -685,7 +707,11 @@ export async function runAgent(
   let markFirstResponse = () => {};
   let promptTurnReserved = false;
   const unsubscribe = childSession.subscribe((event) => {
-    if (isMeaningfulRunnerActivity(event)) options.onActivity?.();
+    const observedAt = Date.now();
+    if (isMeaningfulRunnerActivity(event)) {
+      lastActivityAt = observedAt;
+      options.onActivity?.();
+    }
     if (event.type === "turn_start") {
       if (promptTurnReserved) promptTurnReserved = false;
       else options.onTurnStart?.();
@@ -694,11 +720,28 @@ export async function runAgent(
     if (event.type === "message_end" && event.message.role === "assistant") {
       usageAccumulator.addFinalizedTurn(event.message);
     }
-    if (
-      event.type === "tool_execution_start" ||
-      event.type === "tool_execution_end"
-    ) {
-      recordToolExecutionTiming(toolTimings, event);
+    if (event.type === "tool_execution_start") {
+      recordToolExecutionTiming(toolTimings, event, observedAt);
+      currentToolMap.set(event.toolCallId, {
+        toolCallId: event.toolCallId,
+        name: event.toolName,
+        argsPreview: truncateUtf8(safeJson(event.args), 512),
+        startedAt: observedAt,
+        updatedAt: observedAt,
+      });
+    } else if (event.type === "tool_execution_update") {
+      const current = currentToolMap.get(event.toolCallId);
+      if (current) {
+        currentToolMap.set(event.toolCallId, {
+          ...current,
+          outputPreview: truncateUtf8(safeJson(event.partialResult), 512),
+          updatedAt: observedAt,
+        });
+      }
+    } else if (event.type === "tool_execution_end") {
+      recordToolExecutionTiming(toolTimings, event, observedAt);
+      currentToolMap.delete(event.toolCallId);
+      completedOperations += 1;
     } else if (
       event.type !== "message_end" &&
       event.type !== "compaction_end"
@@ -706,13 +749,7 @@ export async function runAgent(
       return;
     }
     sync();
-    options.onProgress?.({
-      preview: finalOutput(childSession.messages),
-      usage: { ...usage },
-      model: modelId,
-      contextWindow,
-      transcript: transcriptFromMessages(childSession.messages, toolTimings),
-    });
+    options.onProgress?.(progressSnapshot());
   });
 
   let aborted = false;
@@ -770,10 +807,8 @@ export async function runAgent(
     );
     transcript = transcriptFromMessages(childSession.messages, toolTimings);
     options.onProgress?.({
+      ...progressSnapshot(),
       preview: output,
-      usage: { ...usage },
-      model: modelId,
-      contextWindow,
       transcript,
     });
     unsubscribe();
