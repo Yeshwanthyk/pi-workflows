@@ -76,6 +76,10 @@ export interface AgentOutcome {
   aborted: boolean;
   usage: AgentUsage;
   model?: string;
+  /** Provider id that served the last response (e.g. "anthropic"). */
+  provider?: string;
+  /** Provider display name for the model. */
+  modelName?: string;
   contextWindow?: number;
   transcript: TranscriptEntry[];
 }
@@ -84,6 +88,10 @@ export interface AgentProgress {
   preview: string;
   usage: AgentUsage;
   model?: string;
+  provider?: string;
+  modelName?: string;
+  /** Latest reasoning excerpt from the child, refreshed on each sync. */
+  thinking?: string;
   contextWindow?: number;
   transcript: TranscriptEntry[];
   lastActivityAt: number;
@@ -227,6 +235,21 @@ function finalOutput(messages: AgentMessage[]): string {
     if (text) return text;
   }
   return "";
+}
+
+/** Latest non-empty reasoning excerpt, walking assistant messages newest-first. */
+export function latestThinking(messages: AgentMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    const thinking = msg.content
+      .filter((part) => part.type === "thinking")
+      .map((part) => part.thinking)
+      .join("\n")
+      .trim();
+    if (thinking) return thinking;
+  }
+  return undefined;
 }
 
 function safeJson(value: unknown): string {
@@ -628,6 +651,8 @@ export async function runAgent(
       aborted: false,
       usage: emptyUsage(),
       model: options.model?.id,
+      provider: options.model?.provider,
+      modelName: options.model?.name,
       contextWindow: options.model?.contextWindow,
       transcript: [],
     };
@@ -639,6 +664,8 @@ export async function runAgent(
   const usageAccumulator = createFinalizedUsageAccumulator(options.onUsage);
   let usage = usageAccumulator.usage;
   let modelId = childSession.model?.id ?? options.model?.id;
+  let provider = childSession.model?.provider ?? options.model?.provider;
+  let modelName = childSession.model?.name ?? options.model?.name;
   let contextWindow = childSession.model?.contextWindow;
   let stopReason: string | undefined;
   let errorMessage: string | undefined;
@@ -646,13 +673,23 @@ export async function runAgent(
   const currentToolMap = new Map<string, AgentToolActivity>();
   let completedOperations = 0;
   let lastActivityAt = Date.now();
+  // Rebuilding the transcript walks every message and re-serializes all tool
+  // args/results, so snapshot it only when messages actually change instead of
+  // on every tool/progress event. The final outcome rebuilds it once more.
+  let transcriptCache = transcriptFromMessages(
+    childSession.messages,
+    toolTimings,
+  );
 
   const progressSnapshot = (): AgentProgress => ({
     preview: finalOutput(childSession.messages),
     usage: { ...usage },
     model: modelId,
+    provider,
+    modelName,
+    thinking: latestThinking(childSession.messages),
     contextWindow,
-    transcript: transcriptFromMessages(childSession.messages, toolTimings),
+    transcript: transcriptCache,
     lastActivityAt,
     currentTools: [...currentToolMap.values()],
     completedOperations,
@@ -663,6 +700,8 @@ export async function runAgent(
 
     const sessionModel = childSession.model;
     modelId = sessionModel?.id ?? modelId;
+    provider = sessionModel?.provider ?? provider;
+    modelName = sessionModel?.name ?? modelName;
     contextWindow = sessionModel?.contextWindow ?? contextWindow;
     const context = childSession.getContextUsage();
     if (
@@ -747,6 +786,15 @@ export async function runAgent(
       event.type !== "compaction_end"
     ) {
       return;
+    }
+    // Messages only change on message_end/compaction_end, so that is the only
+    // point where the cached transcript needs to be rebuilt; tool events reuse
+    // the snapshot from the last message boundary.
+    if (event.type === "message_end" || event.type === "compaction_end") {
+      transcriptCache = transcriptFromMessages(
+        childSession.messages,
+        toolTimings,
+      );
     }
     sync();
     options.onProgress?.(progressSnapshot());
@@ -833,6 +881,8 @@ export async function runAgent(
       aborted: true,
       usage: { ...usage },
       model: modelId,
+      provider,
+      modelName,
       contextWindow,
       transcript,
     };
@@ -847,6 +897,8 @@ export async function runAgent(
       aborted: false,
       usage: { ...usage },
       model: modelId,
+      provider,
+      modelName,
       contextWindow,
       transcript,
     };
@@ -873,6 +925,8 @@ export async function runAgent(
     aborted: false,
     usage: { ...usage },
     model: modelId,
+    provider,
+    modelName,
     contextWindow,
     transcript,
   };

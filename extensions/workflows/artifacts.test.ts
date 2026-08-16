@@ -171,6 +171,57 @@ test("artifact loading scopes sidecars to basenames and degrades cleanly", () =>
   }
 });
 
+test("live checkpoints skip sidecars; final flush writes them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "workflow-sidecars-"));
+  try {
+    const details = workflowDetails();
+    details.agents = [
+      {
+        index: 1,
+        label: "fixture",
+        phase: "Scan",
+        state: "running",
+        queuedAt: 1,
+        startedAt: 2,
+        preview: "",
+        usage: emptyUsage(),
+        transcript: [{ role: "user", text: "current prompt" }],
+      },
+    ];
+    details.result = { answer: 42 };
+
+    const persistence = createWorkflowPersistence(dir, details, {
+      intervalMs: 5,
+      persist: (runDir, current) =>
+        persistWorkflowJson(runDir, current, { artifacts: false }),
+      finalPersist: (runDir, current) =>
+        persistWorkflowJson(runDir, current, { artifacts: true }),
+    });
+
+    persistence.checkpoint({ immediate: true });
+    const workflow = JSON.parse(
+      readFileSync(join(dir, "workflow.json"), "utf8"),
+    ) as WorkflowDetails;
+    assert.equal(workflow.agents[0]?.label, "fixture");
+    assert.equal(workflow.transcriptArtifact, "transcripts.json");
+    // No large sidecars during live checkpoints.
+    assert.throws(() => readFileSync(join(dir, "transcripts.json"), "utf8"));
+    assert.throws(() => readFileSync(join(dir, "result.json"), "utf8"));
+
+    persistence.flush();
+    const transcripts = JSON.parse(
+      readFileSync(join(dir, "transcripts.json"), "utf8"),
+    ) as Record<string, TranscriptEntry[]>;
+    assert.equal(transcripts["1"]?.[0]?.text, "current prompt");
+    const result = JSON.parse(
+      readFileSync(join(dir, "result.json"), "utf8"),
+    ) as unknown;
+    assert.deepEqual(result, { answer: 42 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("workflow checkpoints throttle updates and support immediate/final flushes", async () => {
   const details = workflowDetails();
   const snapshots: WorkflowDetails[] = [];

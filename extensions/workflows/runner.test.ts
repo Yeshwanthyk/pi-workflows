@@ -15,6 +15,7 @@ import {
   createFinalizedUsageAccumulator,
   createFirstResponseWatchdog,
   guardWorkflowChildTools,
+  latestThinking,
   recordToolExecutionTiming,
   runAgent,
   transcriptFromMessages,
@@ -511,6 +512,34 @@ test("in-flight aborted tool calls retain start timing without completion", () =
   );
 });
 
+test("latestThinking returns the most recent non-empty reasoning excerpt", () => {
+  const thinking = (text: string) => ({
+    role: "assistant" as const,
+    content: [{ type: "thinking" as const, thinking: text }],
+  });
+  const textMessage = (text: string) => ({
+    role: "assistant" as const,
+    content: [{ type: "text" as const, text }],
+  });
+  const messages = [
+    textMessage("first answer"),
+    thinking("first reasoning"),
+    thinking("  "),
+    thinking("second reasoning"),
+    textMessage("final answer"),
+  ] as unknown as AgentSession["messages"];
+
+  const minimal = (m: unknown): Parameters<typeof latestThinking>[0] =>
+    m as Parameters<typeof latestThinking>[0];
+
+  assert.equal(latestThinking(minimal(messages)), "second reasoning");
+  assert.equal(
+    latestThinking(minimal([textMessage("no thinking")])),
+    undefined,
+  );
+  assert.equal(latestThinking(minimal([])), undefined);
+});
+
 test("runAgent recovers once when the model returns plain JSON instead of structured output", async () => {
   const { outcome, prompts, turnStarts, activities, progressUsage } =
     await runMissingStructuredOutputRecovery();
@@ -654,6 +683,19 @@ test("runAgent progress exposes live tool activity and completion counts", async
   );
   assert.equal(progress.at(-1)?.currentTools.length, 0);
   assert.equal(progress.at(-1)?.completedOperations, 1);
+  // Transcript is snapshot-cached: tool events reuse one array reference and
+  // only message_end refreshes it, so progress does not rebuild per event.
+  const toolSnapshots = progress.filter(
+    (entry) => entry.currentTools.length > 0,
+  );
+  assert.ok(toolSnapshots.length > 0);
+  for (const snapshot of toolSnapshots) {
+    assert.equal(snapshot.transcript, toolSnapshots[0]!.transcript);
+  }
+  const finalTranscript = progress.at(-1)?.transcript;
+  assert.equal(finalTranscript?.length, 1);
+  assert.equal(finalTranscript?.[0]?.role, "assistant");
+  assert.notEqual(finalTranscript, toolSnapshots[0]!.transcript);
 });
 
 test("runAgent upgrades orderly teardown when cancellation races it", async () => {

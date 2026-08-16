@@ -116,6 +116,71 @@ test("stored run loading recovers stale running detail", (t) => {
   );
 });
 
+test("normalized agents carry provider, model name, and thinking preview", () => {
+  const details = normalizeDetails("wf_fixture", {
+    status: "completed",
+    startedAt: 1,
+    agents: [
+      {
+        index: 1,
+        label: "modern",
+        state: "done",
+        startedAt: 2,
+        finishedAt: 3,
+        provider: "anthropic",
+        model: "claude-sonnet-4-5",
+        modelName: "Claude Sonnet 4.5",
+        thinkingLevel: "high",
+        thinkingPreview:
+          "The seam must close within 2 px.\nRe-observe the card.",
+      },
+      {
+        index: 2,
+        label: "legacy",
+        state: "done",
+        startedAt: 2,
+        finishedAt: 3,
+        provider: 42,
+        modelName: ["bad"],
+        thinkingPreview: { not: "a string" },
+      },
+    ],
+  });
+
+  assert.ok(details);
+  assert.deepEqual(details.agents[0], {
+    index: 1,
+    label: "modern",
+    phase: undefined,
+    state: "done",
+    model: "claude-sonnet-4-5",
+    provider: "anthropic",
+    modelName: "Claude Sonnet 4.5",
+    thinkingPreview: "The seam must close within 2 px.\nRe-observe the card.",
+    thinkingLevel: "high",
+    contextWindow: undefined,
+    queuedAt: 2,
+    startedAt: 2,
+    finishedAt: 3,
+    error: undefined,
+    preview: "",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      outputComplete: false,
+      costComplete: false,
+      turns: 0,
+    },
+    transcript: [],
+  });
+  assert.equal(details.agents[1]?.provider, undefined);
+  assert.equal(details.agents[1]?.modelName, undefined);
+  assert.equal(details.agents[1]?.thinkingPreview, undefined);
+});
+
 test("report exposes queued/running counts and effective capacity", () => {
   const details = normalizeDetails("wf_fixture", {
     name: "fixture",

@@ -31,11 +31,13 @@ import { normalizeEffectiveWorkflowLimits } from "./limits.ts";
 import {
   agentContext,
   countStates,
+  dominantModel,
   formatAgentLifecycle,
   formatElapsed,
   formatUsage,
   aggregateUsage,
   isWorkflowThinkingLevel,
+  modelBadge,
   normalizeAgentUsage,
   normalizeBudgetTelemetry,
   normalizeTerminationRecord,
@@ -45,6 +47,8 @@ import {
   stateSquare,
   statusColor,
   statusWord,
+  thinkingColor,
+  thinkingExcerpt,
   SQUARE,
   type Theme,
   type AgentRecord,
@@ -102,6 +106,10 @@ export function normalizeDetails(
       phase: typeof a.phase === "string" ? a.phase : undefined,
       state,
       model: typeof a.model === "string" ? a.model : undefined,
+      provider: typeof a.provider === "string" ? a.provider : undefined,
+      modelName: typeof a.modelName === "string" ? a.modelName : undefined,
+      thinkingPreview:
+        typeof a.thinkingPreview === "string" ? a.thinkingPreview : undefined,
       thinkingLevel: isWorkflowThinkingLevel(a.thinkingLevel)
         ? a.thinkingLevel
         : undefined,
@@ -316,7 +324,7 @@ export function buildReport(details: WorkflowDetails): string {
             ? "FAILED"
             : agent.state;
       const stats = [
-        agent.model,
+        agent.provider ? `${agent.provider}/${agent.model}` : agent.model,
         agent.thinkingLevel ? `think:${agent.thinkingLevel}` : undefined,
         agentContext(agent),
         formatElapsed(agent.startedAt, agent.finishedAt),
@@ -472,6 +480,47 @@ export class WorkflowDashboard {
       this.notice = `save failed: ${error instanceof Error ? error.message : String(error)}`;
     }
     this.noticeAt = Date.now();
+  }
+
+  /** Bottom strip showing the selected agent's live reasoning. */
+  private thinkingPanel(
+    d: WorkflowDetails,
+    width: number,
+    height: number,
+  ): string[] {
+    const theme = this.theme;
+    const agent = this.selectedAgent();
+    const title = agent ? ` thinking · ${agent.label} ` : " thinking ";
+    const rows: string[] = [];
+    if (!agent) {
+      rows.push(theme.fg("dim", " select an agent to inspect its reasoning"));
+      return this.panel(title, rows, width, height);
+    }
+    const meta = [
+      modelBadge(agent),
+      agent.thinkingLevel && agent.thinkingLevel !== "off"
+        ? `think:${agent.thinkingLevel}`
+        : undefined,
+      agentContext(agent),
+      formatElapsed(agent.startedAt, agent.finishedAt),
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    rows.push(theme.fg("dim", ` ${meta}`));
+    const excerpt = thinkingExcerpt(agent, 220);
+    if (excerpt) {
+      const color = agent.thinkingLevel
+        ? thinkingColor(agent.thinkingLevel)
+        : "thinkingText";
+      rows.push(` ${theme.fg(color, excerpt)}`);
+    } else if (agent.state === "running") {
+      rows.push(theme.fg("dim", " reasoning not streamed yet"));
+    } else if (agent.state === "done") {
+      rows.push(theme.fg("dim", " no reasoning captured for this agent"));
+    } else {
+      rows.push(theme.fg("dim", " waiting to start"));
+    }
+    return this.panel(title, rows, width, height);
   }
 
   handleInput(data: string) {
@@ -728,7 +777,10 @@ export class WorkflowDashboard {
         ) +
         theme.fg(statusColor(d.status), statusWord(d.status)) +
         " ";
-      const left = ` ${marker} ${statusSquareFor(d, theme)} ${label} ${theme.fg("dim", d.runId)}`;
+      const model = dominantModel(d);
+      const left = ` ${marker} ${statusSquareFor(d, theme)} ${label}${
+        model ? ` ${theme.fg("dim", model)}` : ""
+      } ${theme.fg("dim", d.runId)}`;
       return this.split(left, right, width - 2);
     });
     lines.push(...this.panel("Runs", rows, width, panelHeight));
@@ -772,7 +824,9 @@ export class WorkflowDashboard {
       " " +
       theme.fg(
         "muted",
-        [d.description ?? d.runId, capacity].filter(Boolean).join(" · "),
+        [dominantModel(d), d.description ?? d.runId, capacity]
+          .filter(Boolean)
+          .join(" · "),
       );
     lines.push(
       this.split(subLeft, totals ? theme.fg("dim", `${totals} `) : " ", width),
@@ -783,7 +837,8 @@ export class WorkflowDashboard {
     const selectedGroup = groups[this.phaseIndex];
     this.clampAgentIndex();
 
-    const panelHeight = height - 3;
+    const thinkHeight = height >= 22 ? 5 : height >= 17 ? 4 : 0;
+    const panelHeight = height - 3 - thinkHeight;
     const bodyHeight = Math.max(0, panelHeight - 2);
 
     // Left: phases sidebar.
@@ -821,7 +876,19 @@ export class WorkflowDashboard {
               `${groupDone}/${group.agents.length}${groupRunning ? ` r${groupRunning}` : ""}${groupQueued ? ` q${groupQueued}` : ""} `,
             )
           : theme.fg("dim", "- ");
-      return this.split(` ${marker} ${square} ${title}`, counts, sidebarInner);
+      const bar = miniProgressBar(
+        group.agents.filter((a) => a.state === "done" || a.state === "error")
+          .length,
+        group.agents.length,
+        5,
+        theme,
+        group.agents.some((a) => a.state === "error"),
+      );
+      return this.split(
+        ` ${marker} ${square} ${title} ${bar}`,
+        counts,
+        sidebarInner,
+      );
     });
 
     // Right: agents in the selected phase.
@@ -845,18 +912,30 @@ export class WorkflowDashboard {
           selected && this.detailFocus === "agents"
             ? theme.fg("accent", "❯")
             : " ";
-        const stats = [
-          agent.model,
-          agent.thinkingLevel ? `think:${agent.thinkingLevel}` : undefined,
-          agentContext(agent),
-        ]
-          .filter(Boolean)
-          .join(" · ");
+        const model = agent.model
+          ? ` ${
+              agent.provider
+                ? theme.fg("accent", agent.provider) +
+                  theme.fg("dim", "/") +
+                  theme.fg("text", agent.model)
+                : theme.fg("text", agent.model)
+            }`
+          : "";
+        const think =
+          agent.thinkingLevel && agent.thinkingLevel !== "off"
+            ? ` ${theme.fg("dim", "think:")}${theme.fg(
+                thinkingColor(agent.thinkingLevel),
+                agent.thinkingLevel,
+              )}`
+            : "";
+        const context = agentContext(agent);
         const label =
           selected && this.detailFocus === "agents"
             ? theme.fg("accent", agent.label.padEnd(Math.min(maxLabel, 40)))
             : theme.fg("text", agent.label.padEnd(Math.min(maxLabel, 40)));
-        const left = ` ${marker} ${stateSquare(agent.state, theme)} ${label}  ${theme.fg("dim", stats)}`;
+        const left = ` ${marker} ${stateSquare(agent.state, theme)} ${label}${model}${think}${
+          context ? ` ${theme.fg("dim", context)}` : ""
+        }`;
         const right = theme.fg(
           "dim",
           `${formatElapsed(agent.startedAt, agent.finishedAt)} `,
@@ -907,6 +986,10 @@ export class WorkflowDashboard {
       lines.push(`${leftPanel[i] ?? ""} ${rightPanel[i] ?? ""}`);
     }
 
+    if (thinkHeight > 0) {
+      lines.push(...this.thinkingPanel(d, width, thinkHeight));
+    }
+
     const hint =
       this.detailFocus === "phases"
         ? `j/k select phase · l/${this.keys("tui.editor.cursorRight")}/${this.keys("tui.select.confirm")} agents · ${this.keys("tui.select.cancel")} back · s save report`
@@ -928,20 +1011,62 @@ export class WorkflowDashboard {
     }
 
     for (const entry of agent.transcript) {
+      // Tool calls/results render as regular chat-style tool blocks.
+      if (entry.role === "tool" || entry.role === "toolResult") {
+        rows.push(...this.transcriptToolBlock(entry, width));
+        rows.push("");
+        continue;
+      }
       const label = transcriptLabel(entry);
-      const color = transcriptColor(entry);
+      let color:
+        ReturnType<typeof transcriptColor> | ReturnType<typeof thinkingColor> =
+        transcriptColor(entry);
+      if (entry.role === "thinking" && agent.thinkingLevel) {
+        color = thinkingColor(agent.thinkingLevel);
+      }
       rows.push(
         ` ${theme.fg(color, SQUARE)} ${theme.bold(theme.fg(color, label))}`,
       );
       const contentWidth = Math.max(8, width - 4);
-      const styled = theme.fg(
-        entry.role === "thinking" ? "dim" : entry.isError ? "error" : "text",
-        entry.text,
-      );
+      const bodyColor =
+        entry.role === "thinking" ? color : entry.isError ? "error" : "text";
+      const styled =
+        entry.role === "thinking"
+          ? theme.italic(theme.fg(bodyColor, entry.text))
+          : theme.fg(bodyColor, entry.text);
       for (const line of wrapTextWithAnsi(styled, contentWidth)) {
         rows.push(`   ${line}`);
       }
       rows.push("");
+    }
+    return rows;
+  }
+
+  /** Chat-style tool block: pending/success/error background + bold name. */
+  private transcriptToolBlock(entry: TranscriptEntry, width: number): string[] {
+    const theme = this.theme;
+    const name = entry.name ?? "tool";
+    const pending = entry.role === "tool";
+    const bgColor = pending
+      ? "toolPendingBg"
+      : entry.isError
+        ? "toolErrorBg"
+        : "toolSuccessBg";
+    const bg = (text: string) => theme.bg(bgColor, text);
+    const title =
+      theme.bold(theme.fg("toolTitle", name)) +
+      (entry.durationMs !== undefined
+        ? theme.fg("dim", ` · ${(entry.durationMs / 1000).toFixed(1)}s`)
+        : "");
+    const inner = Math.max(12, width - 4);
+    const rows: string[] = [bg(` ${title} `)];
+    const body = singleLineBounded(entry.text, 160);
+    if (body) {
+      const bodyColor = pending ? "dim" : entry.isError ? "error" : "success";
+      const bodyStyled = theme.fg(bodyColor, body);
+      for (const line of wrapTextWithAnsi(bodyStyled, inner - 2)) {
+        rows.push(bg(` ${line} `));
+      }
     }
     return rows;
   }
@@ -1005,6 +1130,17 @@ export class WorkflowDashboard {
   }
 }
 
+/** Collapse whitespace and bound a line for dense tool blocks. */
+function singleLineBounded(text: string, maxLength = 160): string {
+  const value = text
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return value.length <= maxLength
+    ? value
+    : `${value.slice(0, maxLength - 1)}\u2026`;
+}
+
 function transcriptLabel(entry: TranscriptEntry): string {
   if (entry.role === "user") return "USER";
   if (entry.role === "assistant") return "ASSISTANT";
@@ -1026,6 +1162,23 @@ function transcriptColor(
 
 function statusSquareFor(details: WorkflowDetails, theme: Theme): string {
   return theme.fg(statusColor(details.status), SQUARE);
+}
+
+/** Compact progress bar tinted by phase health. */
+function miniProgressBar(
+  filled: number,
+  total: number,
+  width: number,
+  theme: Theme,
+  error = false,
+): string {
+  const ratio = total > 0 ? filled / total : 0;
+  const full = Math.min(width, Math.round(ratio * width));
+  const color = error ? "error" : full > 0 ? "borderAccent" : "dim";
+  return (
+    theme.fg(color, "\u2588".repeat(full)) +
+    theme.fg("dim", "\u2591".repeat(Math.max(0, width - full)))
+  );
 }
 
 function groupSquare(group: PhaseGroup, theme: Theme): string {

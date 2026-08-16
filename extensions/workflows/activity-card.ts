@@ -4,11 +4,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   countStates,
+  dominantModel,
   formatElapsed,
+  modelBadge,
   phaseGroups,
   stateSquare,
   statusColor,
   statusWord,
+  thinkingColor,
+  thinkingExcerpt,
   SQUARE,
   type AgentRecord,
   type WorkflowDetails,
@@ -56,6 +60,38 @@ function currentOperation(agent: AgentRecord, now: number) {
   return `${bounded(`${tool.name}${tool.argsPreview ? ` ${tool.argsPreview}` : ""}`)} · ${formatElapsed(tool.startedAt, now)}`;
 }
 
+/** "provider/model" chip colored with the provider accent. */
+function modelChip(agent: AgentRecord, theme: Theme): string {
+  const badge = modelBadge(agent);
+  if (!badge) return "";
+  const colored =
+    agent.provider && agent.model
+      ? theme.fg("accent", agent.provider) +
+        theme.fg("dim", "/") +
+        theme.fg("text", agent.model)
+      : theme.fg("text", badge);
+  return ` ${colored}`;
+}
+
+/** "think:level" chip tinted with the level's theme color. */
+function thinkingChip(agent: AgentRecord, theme: Theme): string {
+  if (!agent.thinkingLevel || agent.thinkingLevel === "off") return "";
+  return (
+    ` ${theme.fg("dim", "think:")}` +
+    theme.fg(thinkingColor(agent.thinkingLevel), agent.thinkingLevel)
+  );
+}
+
+/** Live reasoning excerpt line, tinted by the agent's thinking level. */
+function thinkingLine(agent: AgentRecord, theme: Theme): string {
+  const excerpt = thinkingExcerpt(agent, 120);
+  if (!excerpt) return "";
+  const color = agent.thinkingLevel
+    ? thinkingColor(agent.thinkingLevel)
+    : "thinkingText";
+  return `\n  ${theme.fg("dim", "⟡")} ${theme.fg(color, excerpt)}`;
+}
+
 export function renderWorkflowActivityCard(
   details: WorkflowDetails,
   theme: Theme,
@@ -74,6 +110,8 @@ export function renderWorkflowActivityCard(
     theme.fg(statusColor(details.status), statusWord(details.status));
   if (failed) text += theme.fg("error", ` · ${failed} failed`);
   if (details.background) text += theme.fg("dim", " (background)");
+  const dominant = dominantModel(details);
+  if (dominant) text += theme.fg("dim", ` · ${dominant}`);
 
   const phases = phaseProgress(details);
   if (phases) text += `\n  ${theme.fg("muted", phases)}`;
@@ -99,6 +137,8 @@ export function renderWorkflowActivityCard(
         ` · model working · activity ${formatElapsed(lastActivity, now)} ago`,
       );
     }
+    text += modelChip(agent, theme) + thinkingChip(agent, theme);
+    if (agent.state === "running") text += thinkingLine(agent, theme);
   }
   if (visibleAgents.length > (options.expanded ? 12 : 5)) {
     text += `\n  ${theme.fg("dim", `+${visibleAgents.length - (options.expanded ? 12 : 5)} more agents`)}`;

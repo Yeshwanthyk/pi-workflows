@@ -134,6 +134,12 @@ export interface AgentRecord {
   phase?: string;
   state: AgentState;
   model?: string;
+  /** Provider id (e.g. "anthropic") that served this agent. */
+  provider?: string;
+  /** Provider display name (e.g. "Claude Sonnet 4.5"). */
+  modelName?: string;
+  /** Latest reasoning excerpt, streamed live while the agent works. */
+  thinkingPreview?: string;
   /** Resolved Pi thinking level used by this agent. */
   thinkingLevel?: WorkflowThinkingLevel;
   /** Context capacity of the active model used for this agent. */
@@ -232,6 +238,93 @@ export function formatUsage(
   if (model) parts.push(model);
   if (thinkingLevel) parts.push(`think:${thinkingLevel}`);
   return parts.join(" · ");
+}
+
+/** Compact "provider/model" badge text, falling back to the model id alone. */
+export function modelBadge(agent: {
+  provider?: string;
+  model?: string;
+}): string | undefined {
+  if (!agent.model) return undefined;
+  return agent.provider ? `${agent.provider}/${agent.model}` : agent.model;
+}
+
+/** Shortest distinguishing model label: provider/model, else model id. */
+export function modelLabel(agent: {
+  provider?: string;
+  model?: string;
+  modelName?: string;
+}): string {
+  return (
+    (agent.provider && agent.model
+      ? `${agent.provider}/${agent.model}`
+      : undefined) ??
+    agent.model ??
+    agent.modelName ??
+    "unknown model"
+  );
+}
+
+/** Theme color token matching a thinking level ("thinkingMedium" etc). */
+export function thinkingColor(
+  level: WorkflowThinkingLevel,
+):
+  | "thinkingOff"
+  | "thinkingMinimal"
+  | "thinkingLow"
+  | "thinkingMedium"
+  | "thinkingHigh"
+  | "thinkingXhigh"
+  | "thinkingMax" {
+  switch (level) {
+    case "off":
+      return "thinkingOff";
+    case "minimal":
+      return "thinkingMinimal";
+    case "low":
+      return "thinkingLow";
+    case "medium":
+      return "thinkingMedium";
+    case "high":
+      return "thinkingHigh";
+    case "xhigh":
+      return "thinkingXhigh";
+    case "max":
+      return "thinkingMax";
+  }
+}
+
+/** One-line reasoning excerpt, bounded for dense TUI rows. */
+export function thinkingExcerpt(
+  agent: Pick<AgentRecord, "thinkingPreview">,
+  maxLength = 140,
+): string | undefined {
+  if (!agent.thinkingPreview) return undefined;
+  const text = agent.thinkingPreview
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return undefined;
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
+/** Most common model badge across agents, for headers and list rows. */
+export function dominantModel(details: WorkflowDetails): string | undefined {
+  const counts = new Map<string, number>();
+  for (const agent of details.agents) {
+    const badge = modelBadge(agent);
+    if (!badge) continue;
+    counts.set(badge, (counts.get(badge) ?? 0) + 1);
+  }
+  let best: string | undefined;
+  let bestCount = 0;
+  for (const [badge, count] of counts) {
+    if (count > bestCount) {
+      best = badge;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 /** Current per-agent context-window utilization, e.g. "7%/372k". */

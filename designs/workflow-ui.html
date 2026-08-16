@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pi-workflows — redesigned UI</title>
+<style>
+  :root {
+    --page-bg: #18181e;
+    --card-bg: #1e1e24;
+    --card-bg-2: #232329;
+    --tool-bg: #282832;
+    --tool-ok-bg: #283228;
+    --tool-err-bg: #3c2828;
+    --selected-bg: #3a3a4a;
+    --accent: #8abeb7;
+    --border: #5f87ff;
+    --border-accent: #00d7ff;
+    --border-muted: #505050;
+    --success: #b5bd68;
+    --error: #cc6666;
+    --warning: #ffff00;
+    --muted: #808080;
+    --dim: #666666;
+    --text: #d4d4d4;
+    --thinking: #81a2be;
+    --think-high: #b294bb;
+    --think-xhigh: #d183e8;
+    --md-heading: #f0c674;
+    --md-link: #81a2be;
+    --purple: #9575cd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page-bg);
+    color: var(--text);
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "JetBrains Mono", monospace;
+    font-size: 14px;
+    line-height: 1.55;
+    padding: 40px 24px 80px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1.hero {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 6px;
+  }
+  .hero .accent { color: var(--accent); }
+  p.sub {
+    color: var(--muted);
+    margin: 0 0 42px;
+    max-width: 640px;
+    font-size: 13.5px;
+  }
+  .section {
+    margin: 0 0 56px;
+  }
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin: 0 0 14px;
+    border-bottom: 1px solid #2c2c34;
+    padding-bottom: 10px;
+  }
+  .section-head h2 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--border-accent);
+    letter-spacing: 0.02em;
+    margin: 0;
+    text-transform: uppercase;
+  }
+  .section-head .tag {
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .note {
+    background: #2d2838;
+    border-left: 3px solid var(--purple);
+    padding: 10px 14px;
+    border-radius: 0 6px 6px 0;
+    color: var(--muted);
+    font-size: 12.5px;
+    margin: 14px 0 20px;
+  }
+  .note b { color: var(--text); font-weight: 600; }
+  .note code {
+    color: var(--accent);
+    background: rgba(138,190,183,0.08);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+
+  /* ---- terminal chrome ---- */
+  .term {
+    background: var(--card-bg);
+    border: 1px solid #2c2c34;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    margin-bottom: 18px;
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 14px;
+    background: #212127;
+    border-bottom: 1px solid #2c2c34;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.r { background: #e06c75; }
+  .dot.y { background: #d19a66; }
+  .dot.g { background: #98c379; }
+  .term-title {
+    margin-left: 8px;
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .term-title b { color: var(--muted); font-weight: 600; }
+  .term-body { padding: 14px 16px 16px; overflow-x: auto; }
+  .term-body .spacer { height: 10px; }
+
+  /* generic glyphs */
+  .sq { color: var(--muted); }
+  .sq.ok { color: var(--success); }
+  .sq.err { color: var(--error); }
+  .sq.warn { color: var(--warning); }
+  .sq.run { color: var(--border-accent); }
+
+  /* ---- activity card ---- */
+  .card {
+    background: var(--tool-bg);
+    border: 1px solid #33333f;
+    border-left: 3px solid var(--border-accent);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  .card.ok { border-left-color: var(--success); }
+  .card.err { border-left-color: var(--error); }
+  .card.draft { border-left-color: var(--border); }
+  .card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .kw {
+    color: var(--text);
+    font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+  .run-name { color: var(--accent); font-weight: 700; }
+  .muted { color: var(--muted); }
+  .dim { color: var(--dim); }
+  .ok-text { color: var(--success); }
+  .err-text { color: var(--error); }
+  .warn-text { color: var(--warning); }
+  .accent-text { color: var(--accent); }
+  .cyan-text { color: var(--border-accent); }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid #3a3a46;
+    border-radius: 4px;
+    padding: 0 6px;
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--text);
+    background: #26262e;
+    white-space: nowrap;
+  }
+  .chip .p {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .chip .sep { color: var(--dim); }
+  .chip .m { color: var(--text); }
+  .chip.think-low { border-color: #5f87af; color: #5f87af; }
+  .chip.think-med { border-color: var(--thinking); color: var(--thinking); }
+  .chip.think-high { border-color: var(--think-high); color: var(--think-high); }
+  .chip.think-xhigh { border-color: var(--think-xhigh); color: var(--think-xhigh); }
+  .chip.prov {
+    color: var(--muted);
+    border-style: dashed;
+  }
+  .chip.live {
+    border-color: var(--border-accent);
+    color: var(--border-accent);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.45; } }
+
+  /* phase pipeline */
+  .pipeline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 8px 0 4px;
+    font-size: 12.5px;
+  }
+  .phase {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #26262e;
+    border: 1px solid #34343f;
+    border-radius: 5px;
+    padding: 2px 8px;
+    color: var(--muted);
+  }
+  .phase .count { color: var(--dim); font-size: 11px; }
+  .phase.done { border-color: #4a5a3a; }
+  .phase.done .t { color: var(--success); }
+  .phase.active {
+    border-color: var(--border-accent);
+    background: #202a31;
+  }
+  .phase.active .t { color: var(--border-accent); font-weight: 600; }
+  .phase.queued .t { color: var(--muted); }
+  .arrow { color: var(--dim); }
+
+  /* agent row */
+  .agent-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; flex-wrap: wrap; font-size: 12.5px; }
+  .agent-row .label { color: var(--text); font-weight: 600; }
+  .agent-row .tool {
+    color: var(--text);
+    background: #20202a;
+    border: 1px solid #34343f;
+    border-radius: 4px;
+    padding: 0 6px;
+    font-size: 11px;
+  }
+  .agent-row .elapsed { color: var(--dim); font-size: 11px; }
+  .thinking-line {
+    margin: 4px 0 2px 2px;
+    color: var(--thinking);
+    font-size: 12px;
+    border-left: 2px solid #3a3a46;
+    padding-left: 10px;
+    max-width: 720px;
+  }
+  .thinking-line .lbl {
+    color: var(--dim);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-right: 6px;
+  }
+  .cursor { display: inline-block; width: 7px; height: 14px; background: var(--border-accent); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .hint {
+    margin-top: 8px;
+    color: var(--dim);
+    font-size: 11.5px;
+  }
+  .hint kbd {
+    background: #26262e;
+    border: 1px solid #3a3a46;
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    padding: 0 5px;
+    font-size: 10.5px;
+    color: var(--muted);
+  }
+
+  /* ---- dashboard ---- */
+  .dash {
+    background: var(--card-bg);
+    border: 1px solid #2c2c34;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .dash-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid #2c2c34;
+    background: #202026;
+  }
+  .dash-head .title { font-weight: 700; color: var(--accent); font-size: 14px; }
+  .dash-head .count { color: var(--dim); font-size: 12px; }
+
+  .run-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 14px;
+    border-bottom: 1px solid #26262e;
+    cursor: default;
+  }
+  .run-row.selected { background: var(--selected-bg); }
+  .run-row .caret { color: var(--accent); width: 12px; }
+  .run-row .meta { flex: 1; min-width: 0; }
+  .run-row .rname { font-weight: 600; color: var(--text); }
+  .run-row.selected .rname { color: var(--accent); }
+  .run-row .rid { color: var(--dim); font-size: 11px; margin-left: 8px; }
+  .run-row .rdesc { color: var(--dim); font-size: 11px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 560px; }
+  .run-row .right { text-align: right; white-space: nowrap; }
+  .run-row .stats { color: var(--dim); font-size: 11px; }
+  .status {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border-radius: 3px;
+    padding: 1px 7px;
+    margin-top: 3px;
+  }
+  .status.running { color: #ffe57f; background: rgba(255,255,0,0.08); border: 1px solid rgba(255,255,0,0.25); }
+  .status.done { color: var(--success); background: rgba(181,189,104,0.08); border: 1px solid rgba(181,189,104,0.28); }
+  .status.failed { color: var(--error); background: rgba(204,102,102,0.08); border: 1px solid rgba(204,102,102,0.3); }
+  .status.aborted { color: var(--muted); background: rgba(128,128,128,0.08); border: 1px solid rgba(128,128,128,0.3); }
+
+  .prog {
+    display: inline-block;
+    width: 54px;
+    height: 7px;
+    border-radius: 4px;
+    background: #2c2c34;
+    overflow: hidden;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  .prog > i {
+    display: block;
+    height: 100%;
+    border-radius: 4px;
+    background: linear-gradient(90deg, var(--accent), var(--border-accent));
+  }
+  .prog.err > i { background: var(--error); }
+
+  .dash-foot {
+    padding: 8px 14px;
+    border-top: 1px solid #2c2c34;
+    color: var(--dim);
+    font-size: 11.5px;
+    background: #202026;
+  }
+
+  /* detail view */
+  .detail-grid {
+    display: grid;
+    grid-template-columns: 230px 1fr;
+    gap: 1px;
+    background: #2c2c34;
+  }
+  .detail-grid > .col { background: var(--card-bg); padding: 10px 0; min-width: 0; }
+  .col-title {
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+    padding: 2px 14px 8px;
+    border-bottom: 1px solid #26262e;
+    margin-bottom: 6px;
+  }
+  .phase-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .phase-item.sel { background: var(--selected-bg); }
+  .phase-item .t { flex: 1; }
+  .phase-item.sel .t { color: var(--accent); font-weight: 600; }
+  .phase-item .n { color: var(--dim); font-size: 11px; }
+  .phase-item .mini-prog { width: 40px; }
+
+  .agent-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    font-size: 12.5px;
+    flex-wrap: wrap;
+  }
+  .agent-item.sel { background: var(--selected-bg); }
+  .agent-item .label { font-weight: 600; }
+  .agent-item.sel .label { color: var(--accent); }
+  .agent-item .el { color: var(--dim); font-size: 11px; margin-left: auto; }
+  .agent-item .err { color: var(--error); font-size: 11.5px; width: 100%; padding-left: 22px; }
+
+  .think-panel {
+    background: var(--card-bg);
+    border-top: 1px solid #2c2c34;
+    padding: 10px 14px 12px;
+  }
+  .think-panel .head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .think-panel .head .lbl {
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--think-high);
+    font-weight: 700;
+  }
+  .think-panel .head .meta { color: var(--dim); font-size: 11px; }
+  .think-body {
+    color: var(--thinking);
+    font-size: 12px;
+    line-height: 1.65;
+    max-height: 96px;
+    overflow: hidden;
+    position: relative;
+  }
+  .think-body .stream { color: var(--text); }
+  .think-fade {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 30px;
+    background: linear-gradient(transparent, var(--card-bg));
+    pointer-events: none;
+  }
+
+  /* transcript */
+  .tx-entry { margin: 4px 0 8px; font-size: 12.5px; }
+  .tx-entry .tag { font-weight: 700; letter-spacing: 0.03em; }
+  .tx-entry.thinking .tag, .tx-entry.thinking .body { color: var(--think-high); font-style: italic; }
+  .tx-entry.user .tag { color: var(--accent); }
+  .tx-entry.assistant .tag { color: var(--success); }
+  .tx-entry.tool .tag { color: var(--warning); }
+  .tx-entry.result .tag { color: var(--muted); }
+  .tx-entry .body { color: var(--text); margin-left: 16px; white-space: pre-wrap; }
+  .tx-entry .args { color: var(--dim); }
+  .toolblock {
+    border-radius: 5px;
+    margin: 4px 0 8px;
+    overflow: hidden;
+    font-size: 12px;
+    border: 1px solid transparent;
+  }
+  .toolblock .tbtitle {
+    padding: 3px 10px;
+    font-size: 11.5px;
+    color: var(--text);
+  }
+  .toolblock .tbtitle b { font-weight: 700; }
+  .toolblock .tbbody {
+    padding: 3px 10px 6px 22px;
+    color: var(--muted);
+    white-space: pre-wrap;
+  }
+  .toolblock.pending { background: var(--tool-bg); border-color: #33333f; }
+  .toolblock.pending .tbtitle { background: #2c2c36; }
+  .toolblock.ok { background: var(--tool-ok-bg); border-color: #3c4a32; }
+  .toolblock.ok .tbtitle { background: #2c382a; }
+  .toolblock.err { background: var(--tool-err-bg); border-color: #523232; }
+  .toolblock.err .tbtitle { background: #402c2c; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 860px) { .two-col { grid-template-columns: 1fr; } }
+
+  .badge-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .vs { text-align: center; color: var(--dim); font-size: 11px; margin: 6px 0 10px; }
+  .arrow-dn { color: var(--border-accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1 class="hero">pi-workflows <span class="accent">UI redesign</span></h1>
+  <p class="sub">
+    Terminal mockups of the redesigned workflow surfaces. Every agent now shows its
+    <span class="accent-text">provider/model</span> and <span class="think-high">thinking level</span>,
+    running agents stream a <span class="thinking">live thinking preview</span>, and the dashboard gets a
+    dedicated thinking panel. Styled with pi's own <code>dark</code> theme palette.
+  </p>
+
+  <!-- ============ 1. ACTIVITY CARD ============ -->
+  <div class="section">
+    <div class="section-head">
+      <h2>1 · Tool block / activity card</h2>
+      <span class="tag">the live strip under the workflow tool call</span>
+    </div>
+    <div class="note">
+      <b>Now:</b> a bare square + counts. <b>Redesign:</b> a phase pipeline, per-agent
+      <code>provider/model</code> + <code>think:level</code> chips, the active tool, and the agent's
+      current reasoning streamed inline as it happens.
+    </div>
+
+    <div class="term">
+      <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="term-title">collapsed card — live run (1s ticker)</span></div>
+      <div class="term-body">
+        <div class="card">
+          <div class="card-head">
+            <span class="sq run">■</span>
+            <span class="kw">workflow</span>
+            <span class="run-name">Verify Ziggy</span>
+            <span class="dim">1/3 · 5s ·</span>
+            <span class="warn-text">running</span>
+            <span class="dim">(background)</span>
+            <span style="flex:1"></span>
+            <span class="chip prov">anthropic</span>
+            <span class="chip"><span class="p">claude-sonnet-4-5</span><span class="sep">/</span><span class="m">3 turns</span></span>
+          </div>
+          <div class="pipeline">
+            <span class="phase done"><span class="sq ok">■</span><span class="t">Gather</span><span class="count">3/3</span></span>
+            <span class="arrow">→</span>
+            <span class="phase active"><span class="sq run">■</span><span class="t">Verification</span><span class="count">1/2</span></span>
+            <span class="arrow">→</span>
+            <span class="phase queued"><span class="sq">■</span><span class="t">Report</span><span class="count">0/1</span></span>
+          </div>
+          <div class="agent-row">
+            <span class="sq ok">■</span><span class="label">gather</span>
+            <span class="chip"><span class="p">gpt-5</span></span>
+            <span class="elapsed">2m 11s · done</span>
+          </div>
+          <div class="agent-row">
+            <span class="sq run">■</span><span class="label">final-check</span>
+            <span class="chip"><span class="p">anthropic</span><span class="sep">/</span><span class="m">claude-sonnet-4-5</span></span>
+            <span class="chip think-high">think:high</span>
+            <span class="chip live">● reasoning</span>
+            <span class="elapsed">38s</span>
+          </div>
+          <div class="thinking-line">
+            <span class="lbl">thinking</span>
+            "Contract says the seam must close within 2 px. I'll re-observe the profile card, then diff the computed styles…"
+            <span class="cursor"></span>
+          </div>
+          <div class="agent-row">
+            <span class="sq">■</span><span class="label">report</span>
+            <span class="chip"><span class="p">queued</span></span>
+          </div>
+          <div class="hint"><kbd>↵</kbd> expand · <kbd>⌘+/</kbd> /workflows · <kbd>esc</kbd> dismiss</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="term">
+      <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="term-title">collapsed card — settled run</span></div>
+      <div class="term-body">
+        <div class="card ok">
+          <div class="card-head">
+            <span class="sq ok">■</span>
+            <span class="kw">workflow</span>
+            <span class="run-name">Verify Ziggy</span>
+            <span class="dim">3/3 · 4m 52s ·</span>
+            <span class="ok-text">done</span>
+            <span style="flex:1"></span>
+            <span class="chip"><span class="p">gpt-5</span> <span class="sep">·</span> <span class="m">$0.31</span></span>
+          </div>
+          <div class="pipeline">
+            <span class="phase done"><span class="sq ok">■</span><span class="t">Gather</span><span class="count">3/3</span></span>
+            <span class="arrow">→</span>
+            <span class="phase done"><span class="sq ok">■</span><span class="t">Verification</span><span class="count">2/2</span></span>
+            <span class="arrow">→</span>
+            <span class="phase done"><span class="sq ok">■</span><span class="t">Report</span><span class="count">1/1</span></span>
+          </div>
+          <div class="agent-row"><span class="sq ok">■</span><span class="label">gather</span><span class="elapsed">3/3 agents settled · total 212k in · 18k out</span></div>
+          <div class="hint"><kbd>↵</kbd> expand for phases + result · <kbd>/workflows</kbd> for the full run</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 2. EXPANDED RESULT ============ -->
+  <div class="section">
+    <div class="section-head">
+      <h2>2 · Expanded result</h2>
+      <span class="tag">phases → agents → thinking → result</span>
+    </div>
+    <div class="note">
+      <b>Now:</b> a flat list of <code>■ label · context · usage</code> lines. <b>Redesign:</b> each agent gets a
+      provider chip, thinking-level badge, settled time, and a collapsed <b>reasoning excerpt</b>; the result
+      keeps its JSON block with a footer total.
+    </div>
+    <div class="term">
+      <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="term-title">expanded — workflow run</span></div>
+      <div class="term-body">
+        <div class="card ok" style="border-left-width:0; border-radius:6px;">
+          <div class="card-head">
+            <span class="sq ok">■</span>
+            <span class="kw">workflow</span>
+            <span class="run-name">Verify Ziggy</span>
+            <span class="dim">3/3 agents · 4m 52s ·</span>
+            <span class="ok-text">done</span>
+            <span style="flex:1"></span>
+            <span class="chip"><span class="p">gpt-5</span><span class="sep"> · </span><span class="m">212k in / 18k out</span></span>
+          </div>
+
+          <div style="margin-top:12px; color:var(--muted); font-size:11px; letter-spacing:.08em; text-transform:uppercase;">─── Gather ───</div>
+          <div class="agent-row" style="margin-top:8px;">
+            <span class="sq ok">■</span><span class="label">code-rabbit</span>
+            <span class="chip"><span class="p">openai</span><span class="sep">/</span><span class="m">gpt-5</span></span>
+            <span class="chip think-med">think:medium</span>
+            <span class="dim">7%/372k · 5m 37s</span>
+          </div>
+          <div class="thinking-line" style="border-left-color:rgba(178,148,187,.35);">
+            <span class="lbl">reasoning</span>
+            "Comparing the two bot reports, the safe-path concern is real but the data seams don't overlap — recommend Verify phase keep both, warn on shared edits."
+          </div>
+          <div class="agent-row">
+            <span class="sq ok">■</span><span class="label">other-bot</span>
+            <span class="chip"><span class="p">openai</span><span class="sep">/</span><span class="m">gpt-5</span></span>
+            <span class="chip think-med">think:medium</span>
+            <span class="dim">9%/372k · 4m 43s</span>
+          </div>
+
+          <div style="margin-top:12px; color:var(--muted); font-size:11px; letter-spacing:.08em; text-transform:uppercase;">─── Verification ───</div>
+          <div class="agent-row" style="margin-top:8px;">
+            <span class="sq ok">■</span><span class="label">final-check</span>
+            <span class="chip"><span class="p">anthropic</span><span class="sep">/</span><span class="m">claude-sonnet-4-5</span></span>
+            <span class="chip think-high">think:high</span>
+            <span class="dim">31%/200k · 1m 28s</span>
+          </div>
+
+          <div style="margin-top:12px; color:var(--muted); font-size:11px; letter-spacing:.08em; text-transform:uppercase;">─── result ───</div>
+          <div style="background:#18181e; border:1px solid #33333f; border-radius:6px; padding:10px 12px; margin-top:8px; color:var(--success); font-size:12.5px;">
+{ "status": "verified", "checks": [ { "name": "profile-card", "result": "pass" } ], "failed": [] }
+          </div>
+          <div class="dim" style="margin-top:10px; font-size:11.5px;">Total: 5 turns · 212k in · 18k out · $0.31</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 3. DASHBOARD LIST ============ -->
+  <div class="section">
+    <div class="section-head">
+      <h2>3 · /workflows dashboard — list</h2>
+      <span class="tag">progress + model chips + status pills</span>
+    </div>
+    <div class="note">
+      <b>Now:</b> text rows <code>settled/total r1 q1 · elapsed · status</code>.
+      <b>Redesign:</b> a progress bar, phase pipeline snippet, model/provider chips, and status pills —
+      scanning the list reads like a CI board.
+    </div>
+    <div class="term">
+      <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="term-title">/workflows</span></div>
+      <div class="term-body" style="padding:0;">
+        <div class="dash">
+          <div class="dash-head">
+            <span class="title">Workflows</span>
+            <span class="count">4 runs</span>
+          </div>
+
+          <div class="run-row selected">
+            <span class="caret">❯</span>
+            <span class="sq run">■</span>
+            <span class="meta">
+              <span class="rname">Verify Ziggy</span><span class="rid">wf_3f2a…c1</span>
+              <div class="rdesc">Gather both bot reviews, verify against the live profile card</div>
+              <div class="badge-row" style="margin-top:4px;">
+                <span class="chip"><span class="p">anthropic</span><span class="sep">/</span><span class="m">claude-sonnet-4-5</span></span>
+                <span class="chip think-high">think:high</span>
+              </div>
+            </span>
+            <span class="right">
+              <span class="prog"><i style="width:33%"></i></span>
+              <span class="stats">1/3 · 5s</span>
+              <div><span class="status running">running</span></div>
+            </span>
+          </div>
+
+          <div class="run-row">
+            <span class="caret">&nbsp;</span>
+            <span class="sq ok">■</span>
+            <span class="meta">
+              <span class="rname">Audit deps</span><span class="rid">wf_9b77…4e</span>
+              <div class="rdesc">Scan package.json for outdated + unmaintained deps</div>
+              <div class="badge-row" style="margin-top:4px;">
+                <span class="chip"><span class="p">openai</span><span class="sep">/</span><span class="m">gpt-5</span></span>
+              </div>
+            </span>
+            <span class="right">
+              <span class="prog"><i style="width:100%"></i></span>
+              <span class="stats">4/4 · 2m 04s</span>
+              <div><span class="status done">done</span></div>
+            </span>
+          </div>
+
+          <div class="run-row">
+            <span class="caret">&nbsp;</span>
+            <span class="sq err">■</span>
+            <span class="meta">
+              <span class="rname">Ship notes</span><span class="rid">wf_12d8…aa</span>
+              <div class="rdesc">Draft release notes from the merged PRs this week</div>
+              <div class="badge-row" style="margin-top:4px;">
+                <span class="chip"><span class="p">openai</span><span class="sep">/</span><span class="m">gpt-5</span></span>
+                <span class="chip think-xhigh">think:xhigh</span>
+              </div>
+            </span>
+            <span class="right">
+              <span class="prog err"><i style="width:60%"></i></span>
+              <span class="stats">2/3 · 1m 09s</span>
+              <div><span class="status failed">failed</span></div>
+            </span>
+          </div>
+
+          <div class="dash-foot">
+            <kbd style="background:#26262e;border:1px solid #3a3a46;border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:10.5px;">j</kbd>/<kbd style="background:#26262e;border:1px solid #3a3a46;border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:10.5px;">k</kbd> select · <kbd style="background:#26262e;border:1px solid #3a3a46;border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:10.5px;">↵</kbd> open · <kbd style="background:#26262e;border:1px solid #3a3a46;border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:10.5px;">esc</kbd> close
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 4. DASHBOARD DETAIL ============ -->
+  <div class="section">
+    <div class="section-head">
+      <h2>4 · /workflows — run detail</h2>
+      <span class="tag">phases sidebar → agents → live thinking panel</span>
+    </div>
+    <div class="note">
+      <b>Now:</b> two panels (phases / agents), no model info, no thinking.
+      <b>Redesign:</b> phases show mini progress bars; agents show provider chips + thinking badges; the
+      bottom panel streams the <b>selected agent's reasoning live</b> with its provider and context stats in the header.
+    </div>
+    <div class="term">
+      <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="term-title">/workflows wf_3f2a…c1 — live</span></div>
+      <div class="term-body" style="padding:0;">
+        <div class="dash">
+          <div class="dash-head">
+            <span class="title">Verify Ziggy</span>
+            <span class="count">1/3 agents · 5s · <span class="warn-text">running</span> &nbsp;·&nbsp; $0.01</span>
+          </div>
+          <div class="detail-grid">
+            <div class="col">
+              <div class="col-title">Phases</div>
+              <div class="phase-item sel">
+                <span class="sq ok">■</span><span class="t">Gather</span>
+                <span class="prog mini-prog"><i style="width:100%"></i></span><span class="n">3/3</span>
+              </div>
+              <div class="phase-item">
+                <span class="sq run">■</span><span class="t">Verification</span>
+                <span class="prog mini-prog"><i style="width:50%"></i></span><span class="n">1/2</span>
+              </div>
+              <div class="phase-item">
+                <span class="sq">■</span><span class="t">Report</span>
+                <span class="prog mini-prog"><i style="width:0%"></i></span><span class="n">0/1</span>
+              </div>
+            </div>
+            <div class="col">
+              <div class="col-title">Gather · 3 agents</div>
+              <div class="agent-item sel">
+                <span class="caret">❯</span><span class="sq ok">■</span>
+                <span class="label">final-check</span>
+                <span class="chip"><span class="p">anthropic</span><span class="sep">/</span><span class="m">claude-sonnet-4-5</span></span>
+                <span class="chip think-high">think:high</span>
+                <span class="el">38s · 31%/200k</span>
+              </div>
+              <div class="agent-item">
+                <span class="caret">&nbsp;</span><span class="sq ok">■</span>
+                <span class="label">code-rabbit</span>
+                <span class="chip"><span class="p">openai</span><span class="sep">/</span><span class="m">gpt-5</span></span>
+                <span class="el">5m 37s</span>
+              </div>
+              <div class="agent-item">
+                <span class="caret">&nbsp;</span><span class="sq ok">■</span>
+                <span class="label">other-bot</span>
+                <span class="chip"><span class="p">openai</span><span class="sep">/</span><span class="m">gpt-5</span></span>
+                <span class="el">4m 43s</span>
+              </div>
+            </div>
+          </div>
+          <div class="think-panel">
+            <div class="head">
+              <span class="lbl">▼ thinking · final-check</span>
+              <span class="chip"><span class="p">anthropic</span><span class="sep">/</span><span class="m">claude-sonnet-4-5</span></span>
+              <span class="chip think-high">think:high</span>
+              <span class="meta" style="margin-left:auto;">31%/200k · 38s</span>
+            </div>
+            <div class="think-body">
+              The contract says the seam must close within 2&nbsp;px. The profile card is rendered by
+              <span class="stream">ZiggyProfile.vue</span>; I should re-observe the live card rather than trust the
+              screenshot, then diff computed styles against the spec. Two bot reports flagged the same
+              safe-path warning — treat as high-signal, but neither touched the seam, so keep scope tight.
+              <span class="cursor"></span>
+              <div class="think-fade"></div>
+            </div>
+          </div>
+          <div class="dash-foot">
+            <kbd style="background:#26262e;border:1px solid #3a3a46;border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:10.5px;">h</kbd>/<kbd style="background:#26262e;border:1px solid #3a3a46;border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:10.5px;">l</kbd> phases ↔ agents · <kbd style="background:#26262e;border:1px solid #3a3a46;border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:10.5px;">↵</kbd> transcript · <kbd style="background:#26262e;border:1px solid #3a3a46;border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:10.5px;">s</kbd> save report · <kbd style="background:#26262e;border:1px solid #3a3a46;border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:10.5px;">esc</kbd> back
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 5. TRANSCRIPT ============ -->
+  <div class="section">
+    <div class="section-head">
+      <h2>5 · Transcript view</h2>
+      <span class="tag">thinking styled distinctly</span>
+    </div>
+    <div class="note">
+      <b>Now:</b> thinking renders as plain dim text and tools as flat <code>■ TOOL name</code> dumps.
+      <b>Redesign:</b> tool calls/results render as the <b>regular chat-style tool blocks</b> (pending/success/error
+      backgrounds, bold tool name, args and output preview) exactly like pi's own tool rows, and thinking gets the
+      level-tinted italic color matching the <code>think:*</code> badge.
+    </div>
+    <div class="term">
+      <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="term-title">transcript — final-check · anthropic/claude-sonnet-4-5</span></div>
+      <div class="term-body">
+        <div class="tx-entry user"><span class="sq ok">■</span> <span class="tag">USER</span>
+          <div class="body">Verify the Ziggy profile card against the seam contract. Re-observe the live UI, do not trust the screenshot.</div>
+        </div>
+        <div class="tx-entry thinking"><span class="sq" style="color:var(--think-high)">■</span> <span class="tag">THINKING</span>
+          <div class="body">The contract requires the seam to close within 2 px. The screenshot in the brief was taken before the last deploy — re-observe the live card, then diff computed styles. Both bot reports flagged the same safe-path warning; treat it as high signal but out of seam scope.</div>
+        </div>
+        <div class="toolblock pending">
+          <div class="tbtitle"><b>observe_ui</b> <span class="dim">· 0.4s</span></div>
+          <div class="tbbody">"Ziggy Profile"</div>
+        </div>
+        <div class="tx-entry thinking"><span class="sq" style="color:var(--think-high)">■</span> <span class="tag">THINKING</span>
+          <div class="body">Computed gap is 1.5 px — within tolerance. Now check the safe-path warning isn't in the seam diff.</div>
+        </div>
+        <div class="toolblock ok">
+          <div class="tbtitle"><b>observe_ui</b> <span class="dim">· 0.4s</span></div>
+          <div class="tbbody">{ "seam": "closed", "gap": 1.5 }</div>
+        </div>
+        <div class="toolblock err">
+          <div class="tbtitle"><b>edit</b> <span class="dim">· 0.2s</span></div>
+          <div class="tbbody">Could not apply hunk: context mismatch at line 41</div>
+        </div>
+        <div class="tx-entry assistant"><span class="sq ok">■</span> <span class="tag">ASSISTANT</span>
+          <div class="body">Seam verified. Safe-path warning is pre-existing and unrelated to the seam change.</div>
+        </div>
+        <div class="hint" style="margin-top:10px;"><kbd>j</kbd>/<kbd>k</kbd> scroll · <kbd>ctrl-u/d</kbd> page · <kbd>g</kbd>/<kbd>G</kbd> top/bottom · <kbd>esc</kbd> back</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 6. IMPL / VERIFY SLICES ============ -->
+  <div class="section">
+    <div class="section-head">
+      <h2>6 · Impl &amp; verify slices</h2>
+      <span class="tag">workflows built as small end-to-end slices</span>
+    </div>
+    <div class="note">
+      The same discipline applies inside workflows: a run is a stack of small
+      <b>impl slices</b>, each followed by its <b>verify slice</b> before the next starts — so a failure is
+      attributable to one exact slice. Phases are just <code>phase()</code> calls, so a workflow script already
+      declares them; the UI renders each as a pipeline stage with its own progress and agents.
+      Subagents get the same treatment: one agent per slice, <code>impl:*</code> and <code>verify:*</code> labels,
+      model/provider chips so you can see which model did each slice.
+    </div>
+    <div class="term">
+      <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="term-title">sliced workflow — live</span></div>
+      <div class="term-body">
+        <div class="card">
+          <div class="card-head">
+            <span class="sq run">■</span>
+            <span class="kw">workflow</span>
+            <span class="run-name">Ship ziggy profile polish</span>
+            <span class="dim">2/4 · 1m 04s ·</span>
+            <span class="warn-text">running</span>
+          </div>
+          <div class="pipeline">
+            <span class="phase done"><span class="sq ok">■</span><span class="t">impl: profile-card</span><span class="count">1/1</span></span>
+            <span class="arrow">→</span>
+            <span class="phase done"><span class="sq ok">■</span><span class="t">verify: profile-card</span><span class="count">1/1</span></span>
+            <span class="arrow">→</span>
+            <span class="phase active"><span class="sq run">■</span><span class="t">impl: seam-fix</span><span class="count">0/1</span></span>
+            <span class="arrow">→</span>
+            <span class="phase queued"><span class="sq">■</span><span class="t">verify: seam-fix</span><span class="count">0/1</span></span>
+          </div>
+          <div class="agent-row">
+            <span class="sq ok">■</span><span class="label">impl: profile-card</span>
+            <span class="chip"><span class="p">openai</span><span class="sep">/</span><span class="m">gpt-5</span></span>
+            <span class="chip think-med">think:medium</span>
+            <span class="elapsed">22s · done</span>
+          </div>
+          <div class="agent-row">
+            <span class="sq ok">■</span><span class="label">verify: profile-card</span>
+            <span class="chip"><span class="p">anthropic</span><span class="sep">/</span><span class="m">claude-sonnet-4-5</span></span>
+            <span class="chip think-high">think:high</span>
+            <span class="elapsed">41s · done</span>
+          </div>
+          <div class="agent-row">
+            <span class="sq run">■</span><span class="label">impl: seam-fix</span>
+            <span class="chip"><span class="p">openai</span><span class="sep">/</span><span class="m">gpt-5</span></span>
+            <span class="chip think-med">think:medium</span>
+            <span class="chip live">● reasoning</span>
+            <span class="elapsed">1s</span>
+          </div>
+          <div class="thinking-line">
+            <span class="lbl">thinking</span>
+            "Seam is a 1.5px overflow on the card footer. Smallest fix: clamp the flex gap, no layout shift…"
+            <span class="cursor"></span>
+          </div>
+          <div class="hint">verify never starts before its impl settles ok — each slice is independently attributable</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 7. DATA FLOW ============ -->
+  <div class="section">
+    <div class="section-head">
+      <h2>7 · Data plumbing</h2>
+      <span class="tag">what the code changes add</span>
+    </div>
+    <div class="two-col">
+      <div class="term">
+        <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="term-title">model.ts — AgentRecord</span></div>
+        <div class="term-body" style="font-size:12px; color:var(--muted); white-space:pre; overflow-x:auto;">
+<span style="color:var(--md-link)">export interface</span> AgentRecord {
+  index: <span style="color:var(--md-heading)">number</span>;
+  label: <span style="color:var(--md-heading)">string</span>;
+  state: AgentState;
+  <span style="color:var(--success)">+ provider?: string;</span>          <span style="color:var(--dim)">// "anthropic" — from Model.provider</span>
+  <span style="color:var(--success)">+ modelName?: string;</span>        <span style="color:var(--dim)">// "Claude Sonnet 4.5" — display name</span>
+  model?: <span style="color:var(--md-heading)">string</span>;              <span style="color:var(--dim)">// id, unchanged</span>
+  thinkingLevel?: WorkflowThinkingLevel;
+  <span style="color:var(--success)">+ thinkingPreview?: string;</span>  <span style="color:var(--dim)">// latest reasoning excerpt (live)</span>
+  ...
+}
+        </div>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="term-title">runner.ts — progress snapshot</span></div>
+        <div class="term-body" style="font-size:12px; color:var(--muted); white-space:pre; overflow-x:auto;">
+<span style="color:var(--md-link)">const</span> progressSnapshot = () =&gt; ({
+  preview: finalOutput(childSession.messages),
+  <span style="color:var(--success)">+ provider: sessionModel?.provider,</span>
+  <span style="color:var(--success)">+ modelName: sessionModel?.name,</span>
+  <span style="color:var(--success)">+ thinking: latestThinking(childSession.messages),</span>
+  usage: { ...usage },
+  transcript: transcriptFromMessages(...),
+  ...
+});
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="sub" style="margin-top:30px;">
+    Palette: pi <code>dark</code> theme — accent <span style="color:var(--accent)">#8abeb7</span>, border-accent
+    <span style="color:var(--border-accent)">#00d7ff</span>, success <span style="color:var(--success)">#b5bd68</span>,
+    error <span style="color:var(--error)">#cc6666</span>, thinking <span style="color:var(--think-high)">#b294bb</span>.
+    No new dependencies; everything renders with existing <code>Theme.fg/bold</code> + box-drawing characters.
+  </p>
+</div>
+</body>
+</html>

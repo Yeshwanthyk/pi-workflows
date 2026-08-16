@@ -167,24 +167,34 @@ function writeRunFile(runDir: string, name: string, content: string) {
   writeFileAtomic(path.join(runDir, name), content);
 }
 
-export function persistWorkflowJson(runDir: string, details: WorkflowDetails) {
-  const transcripts = Object.fromEntries(
-    details.agents.map((agent) => [
-      agent.index,
-      boundedArtifactTranscript(agent.transcript),
-    ]),
-  );
-  writeRunFile(
-    runDir,
-    "transcripts.json",
-    safeStringify(transcripts, { maxBytes: 2 * 1024 * 1024 }),
-  );
-  if (details.result !== undefined) {
+export function persistWorkflowJson(
+  runDir: string,
+  details: WorkflowDetails,
+  options: { artifacts?: boolean } = {},
+) {
+  // Sidecars (transcripts.json, result.json) are large and only read for
+  // stored-run inspection, never by live UI or resume, so callers can skip
+  // them on frequent live checkpoints and write them once at final flush.
+  const writeArtifacts = options.artifacts ?? true;
+  if (writeArtifacts) {
+    const transcripts = Object.fromEntries(
+      details.agents.map((agent) => [
+        agent.index,
+        boundedArtifactTranscript(agent.transcript),
+      ]),
+    );
     writeRunFile(
       runDir,
-      "result.json",
-      safeStringify(details.result, { maxBytes: 1024 * 1024 }),
+      "transcripts.json",
+      safeStringify(transcripts, { maxBytes: 2 * 1024 * 1024 }),
     );
+    if (details.result !== undefined) {
+      writeRunFile(
+        runDir,
+        "result.json",
+        safeStringify(details.result, { maxBytes: 1024 * 1024 }),
+      );
+    }
   }
   const compact: WorkflowDetails = {
     ...details,
@@ -208,6 +218,8 @@ export function createWorkflowPersistence(
   options: {
     intervalMs?: number;
     persist?: (runDir: string, details: WorkflowDetails) => void;
+    /** Persist used for the synchronous final flush (defaults to `persist`). */
+    finalPersist?: (runDir: string, details: WorkflowDetails) => void;
   } = {},
 ) {
   const intervalMs = Math.max(
@@ -215,6 +227,7 @@ export function createWorkflowPersistence(
     options.intervalMs ?? WORKFLOW_CHECKPOINT_INTERVAL_MS,
   );
   const persist = options.persist ?? persistWorkflowJson;
+  const finalPersist = options.finalPersist ?? persist;
   let lastPersistedAt = Date.now();
   let dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -251,7 +264,7 @@ export function createWorkflowPersistence(
     flush() {
       if (timer) clearTimeout(timer);
       timer = undefined;
-      persist(runDir, details);
+      finalPersist(runDir, details);
       dirty = false;
       lastPersistedAt = Date.now();
     },

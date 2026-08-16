@@ -100,3 +100,20 @@ test("workflow activity protocol publishes phase and current operation", () => {
   assert.equal(item.lastActivityAt, 5_000);
   assert.equal(item.runningProcesses, 0);
 });
+
+test("activity card surfaces provider, thinking level, and live reasoning", () => {
+  const d = details();
+  d.agents[1]!.provider = "anthropic";
+  d.agents[1]!.model = "claude-sonnet-4-5";
+  d.agents[1]!.thinkingLevel = "high";
+  d.agents[1]!.thinkingPreview =
+    "The contract says the seam must close within 2 px.\nRe-observe the live card.";
+
+  const text = renderWorkflowActivityCard(d, theme, { now: 6_000 });
+  assert.match(text, /anthropic\/claude-sonnet-4-5/);
+  assert.match(text, /think:high/);
+  assert.match(
+    text,
+    /⟡ The contract says the seam must close within 2 px\. Re-observe the live card\./,
+  );
+});

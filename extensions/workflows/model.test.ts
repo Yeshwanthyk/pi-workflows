@@ -7,10 +7,26 @@ import {
   formatAgentLifecycle,
   formatUsage,
   isWorkflowThinkingLevel,
+  modelBadge,
+  modelLabel,
   normalizeAgentUsage,
   normalizeBudgetTelemetry,
   type WorkflowDetails,
 } from "./model.ts";
+
+test("model badges combine provider and model id", () => {
+  assert.equal(
+    modelBadge({ provider: "anthropic", model: "claude-sonnet-4-5" }),
+    "anthropic/claude-sonnet-4-5",
+  );
+  assert.equal(modelBadge({ model: "gpt-5" }), "gpt-5");
+  assert.equal(modelBadge({}), undefined);
+  assert.equal(
+    modelLabel({ provider: "openai", model: "gpt-5" }),
+    "openai/gpt-5",
+  );
+  assert.equal(modelLabel({}), "unknown model");
+});
 
 test("workflow thinking levels validate and render with agent usage", () => {
   assert.equal(isWorkflowThinkingLevel("medium"), true);

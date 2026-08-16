@@ -72,11 +72,14 @@ import {
   formatElapsed,
   formatUsage,
   isWorkflowThinkingLevel,
+  modelBadge,
   phaseGroups,
   resultJson,
   stateSquare,
   statusColor,
   statusWord,
+  thinkingColor,
+  thinkingExcerpt,
   SQUARE,
   WORKFLOW_THINKING_LEVELS,
   type AgentRecord,
@@ -713,7 +716,14 @@ export default function workflows(pi: ExtensionAPI) {
       writeRunFile(runDir, "script.js", script);
       if (argsText !== undefined) writeRunFile(runDir, "args.json", argsText);
       persistWorkflowJson(runDir, details);
-      const persistence = createWorkflowPersistence(runDir, details);
+      // Live checkpoints only need the compact workflow.json; the large
+      // transcripts/result sidecars are written once at the final flush.
+      const persistence = createWorkflowPersistence(runDir, details, {
+        persist: (dir, current) =>
+          persistWorkflowJson(dir, current, { artifacts: false }),
+        finalPersist: (dir, current) =>
+          persistWorkflowJson(dir, current, { artifacts: true }),
+      });
 
       // Each concurrent child gets its own extension runtime. All children use
       // the parent cwd and live trust decision.
@@ -788,6 +798,8 @@ export default function workflows(pi: ExtensionAPI) {
               : details.currentPhase,
           state: "queued",
           model: ctx.model?.id,
+          provider: ctx.model?.provider,
+          modelName: ctx.model?.name,
           contextWindow: ctx.model?.contextWindow,
           queuedAt,
           lastActivityAt: queuedAt,
@@ -874,6 +886,8 @@ export default function workflows(pi: ExtensionAPI) {
               }
               controller.taskUpdate(() => {
                 record.model = model?.id;
+                record.provider = model?.provider;
+                record.modelName = model?.name;
                 record.thinkingLevel = thinkingLevel;
                 record.contextWindow = model?.contextWindow;
                 emit();
@@ -906,6 +920,10 @@ export default function workflows(pi: ExtensionAPI) {
                     record.preview = progress.preview.slice(0, PREVIEW_LENGTH);
                     record.usage = { ...progress.usage };
                     record.model = progress.model ?? record.model;
+                    record.provider = progress.provider ?? record.provider;
+                    record.modelName = progress.modelName ?? record.modelName;
+                    record.thinkingPreview =
+                      progress.thinking ?? record.thinkingPreview;
                     record.contextWindow =
                       progress.contextWindow ?? record.contextWindow;
                     record.transcript = progress.transcript;
@@ -920,6 +938,8 @@ export default function workflows(pi: ExtensionAPI) {
               controller.taskUpdate(() => {
                 record.usage = { ...outcome.usage };
                 record.model = outcome.model ?? record.model;
+                record.provider = outcome.provider ?? record.provider;
+                record.modelName = outcome.modelName ?? record.modelName;
                 record.contextWindow =
                   outcome.contextWindow ?? record.contextWindow;
                 record.transcript = outcome.transcript;
@@ -1297,18 +1317,34 @@ export default function workflows(pi: ExtensionAPI) {
           new Text(theme.fg("muted", `─── ${group.title} ───`), 0, 0),
         );
         for (const agent of group.agents) {
-          const usage = formatUsage(
-            agent.usage,
-            agent.model,
-            agent.thinkingLevel,
-          );
+          const usage = formatUsage(agent.usage);
           const context = agentContext(agent);
-          let line = `${stateSquare(agent.state, theme)} ${theme.fg("accent", agent.label)} ${theme.fg(
-            "dim",
-            [context, formatElapsed(agent.startedAt, agent.finishedAt)]
-              .filter(Boolean)
-              .join(" · "),
-          )}`;
+          const model = modelBadge(agent)
+            ? ` ${
+                agent.provider
+                  ? theme.fg("accent", agent.provider) +
+                    theme.fg("dim", "/") +
+                    theme.fg("text", agent.model ?? "")
+                  : theme.fg("text", agent.model ?? "")
+              }`
+            : "";
+          const think =
+            agent.thinkingLevel && agent.thinkingLevel !== "off"
+              ? ` ${theme.fg("dim", "think:")}${theme.fg(
+                  thinkingColor(agent.thinkingLevel),
+                  agent.thinkingLevel,
+                )}`
+              : "";
+          let line =
+            `${stateSquare(agent.state, theme)} ${theme.fg("accent", agent.label)}` +
+            model +
+            think +
+            theme.fg(
+              "dim",
+              ` ${[context, formatElapsed(agent.startedAt, agent.finishedAt)]
+                .filter(Boolean)
+                .join(" · ")}`,
+            );
           if (usage) line += ` ${theme.fg("dim", usage)}`;
           container.addChild(new Text(line, 0, 0));
           if (agent.error) {
@@ -1318,6 +1354,19 @@ export default function workflows(pi: ExtensionAPI) {
           } else if (agent.preview) {
             const preview = agent.preview.split("\n").slice(0, 2).join(" ");
             container.addChild(new Text(`  ${theme.fg("dim", preview)}`, 0, 0));
+          }
+          const reasoning = thinkingExcerpt(agent, 160);
+          if (reasoning) {
+            const color = agent.thinkingLevel
+              ? thinkingColor(agent.thinkingLevel)
+              : "thinkingText";
+            container.addChild(
+              new Text(
+                `  ${theme.fg("dim", "⟡")} ${theme.fg(color, reasoning)}`,
+                0,
+                0,
+              ),
+            );
           }
         }
       }
