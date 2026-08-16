@@ -715,7 +715,8 @@ export default function workflows(pi: ExtensionAPI) {
 
       writeRunFile(runDir, "script.js", script);
       if (argsText !== undefined) writeRunFile(runDir, "args.json", argsText);
-      persistWorkflowJson(runDir, details);
+      // No sidecars yet: an early crash leaves a compact workflow.json only.
+      persistWorkflowJson(runDir, details, { artifacts: false });
       // Live checkpoints only need the compact workflow.json; the large
       // transcripts/result sidecars are written once at the final flush.
       const persistence = createWorkflowPersistence(runDir, details, {
@@ -922,8 +923,11 @@ export default function workflows(pi: ExtensionAPI) {
                     record.model = progress.model ?? record.model;
                     record.provider = progress.provider ?? record.provider;
                     record.modelName = progress.modelName ?? record.modelName;
-                    record.thinkingPreview =
-                      progress.thinking ?? record.thinkingPreview;
+                    record.thinkingPreview = (
+                      progress.thinking ??
+                      record.thinkingPreview ??
+                      ""
+                    ).slice(0, PREVIEW_LENGTH);
                     record.contextWindow =
                       progress.contextWindow ?? record.contextWindow;
                     record.transcript = progress.transcript;

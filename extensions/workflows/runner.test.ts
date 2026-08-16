@@ -538,6 +538,12 @@ test("latestThinking returns the most recent non-empty reasoning excerpt", () =>
     undefined,
   );
   assert.equal(latestThinking(minimal([])), undefined);
+
+  const longReasoning = "r".repeat(10_000);
+  const capped = latestThinking(minimal([thinking(longReasoning)]), 4_096);
+  assert.ok(capped);
+  assert.equal(capped.length <= 4_096, true);
+  assert.ok(capped?.startsWith("rrrr"));
 });
 
 test("runAgent recovers once when the model returns plain JSON instead of structured output", async () => {

@@ -46,6 +46,9 @@ import {
 import { safeStringify, truncateUtf8 } from "./serialization.ts";
 
 const AGENT_OUTPUT_MAX_BYTES = 64 * 1024;
+/** Per-event caps on streamed previews so progress stays O(1)-ish. */
+const PROGRESS_PREVIEW_MAX_CHARS = 4 * 1024;
+const PROGRESS_THINKING_MAX_CHARS = 4 * 1024;
 export const FIRST_RESPONSE_TIMEOUT_MS = 45_000;
 const TRANSCRIPT_ENTRY_MAX_BYTES = 16 * 1024;
 const TRANSCRIPT_TOTAL_MAX_BYTES = 256 * 1024;
@@ -223,30 +226,45 @@ function makeStructuredOutputTool(
   });
 }
 
-function finalOutput(messages: AgentMessage[]): string {
+/** Accumulate parts up to `maxLength` (Infinity keeps full text). */
+function joinParts(parts: readonly string[], maxLength: number): string {
+  let text = "";
+  for (const part of parts) {
+    if (text.length >= maxLength) break;
+    text += `${part.slice(0, maxLength - text.length)}\n`;
+  }
+  return text;
+}
+
+function finalOutput(messages: AgentMessage[], maxLength = Infinity): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
-    const text = msg.content
-      .filter((part) => part.type === "text")
-      .map((part) => part.text)
-      .join("\n")
-      .trim();
+    const text = joinParts(
+      msg.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text),
+      maxLength,
+    ).trim();
     if (text) return text;
   }
   return "";
 }
 
 /** Latest non-empty reasoning excerpt, walking assistant messages newest-first. */
-export function latestThinking(messages: AgentMessage[]): string | undefined {
+export function latestThinking(
+  messages: AgentMessage[],
+  maxLength = Infinity,
+): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
-    const thinking = msg.content
-      .filter((part) => part.type === "thinking")
-      .map((part) => part.thinking)
-      .join("\n")
-      .trim();
+    const thinking = joinParts(
+      msg.content
+        .filter((part) => part.type === "thinking")
+        .map((part) => part.thinking),
+      maxLength,
+    ).trim();
     if (thinking) return thinking;
   }
   return undefined;
@@ -682,12 +700,15 @@ export async function runAgent(
   );
 
   const progressSnapshot = (): AgentProgress => ({
-    preview: finalOutput(childSession.messages),
+    preview: finalOutput(childSession.messages, PROGRESS_PREVIEW_MAX_CHARS),
     usage: { ...usage },
     model: modelId,
     provider,
     modelName,
-    thinking: latestThinking(childSession.messages),
+    thinking: latestThinking(
+      childSession.messages,
+      PROGRESS_THINKING_MAX_CHARS,
+    ),
     contextWindow,
     transcript: transcriptCache,
     lastActivityAt,
