@@ -11,8 +11,58 @@ import {
   modelLabel,
   normalizeAgentUsage,
   normalizeBudgetTelemetry,
+  statusColorFor,
+  statusWordFor,
   type WorkflowDetails,
 } from "./model.ts";
+
+test("derived status flags agent failures even when the script completed", () => {
+  const base = {
+    runId: "wf_x",
+    background: false,
+    startedAt: 1,
+    finishedAt: 2,
+    phases: [],
+  } as unknown as WorkflowDetails;
+  const agent = (state: "done" | "error") => ({
+    index: 1,
+    label: "a",
+    state,
+    queuedAt: 1,
+    preview: "",
+    usage: emptyUsage(),
+    transcript: [],
+  });
+
+  assert.equal(
+    statusWordFor({ ...base, status: "completed", agents: [agent("done")] }),
+    "done",
+  );
+  assert.equal(
+    statusColorFor({ ...base, status: "completed", agents: [agent("done")] }),
+    "success",
+  );
+  assert.equal(
+    statusWordFor({
+      ...base,
+      status: "completed",
+      agents: [agent("done"), agent("error")],
+    }),
+    "done, 1 failed",
+  );
+  assert.equal(
+    statusColorFor({
+      ...base,
+      status: "completed",
+      agents: [agent("done"), agent("error")],
+    }),
+    "warning",
+  );
+  assert.equal(
+    statusWordFor({ ...base, status: "running", agents: [] }),
+    "running",
+  );
+});
 
 test("model badges combine provider and model id", () => {
   assert.equal(

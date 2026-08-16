@@ -10,7 +10,9 @@ import {
   phaseGroups,
   stateSquare,
   statusColor,
+  statusColorFor,
   statusWord,
+  statusWordFor,
   thinkingColor,
   thinkingExcerpt,
   SQUARE,
@@ -101,13 +103,13 @@ export function renderWorkflowActivityCard(
   const { done, failed, running, queued } = countStates(details);
   const settled = done + failed;
   let text =
-    `${theme.fg(statusColor(details.status), SQUARE)} ${theme.fg("toolTitle", theme.bold("workflow "))}` +
+    `${theme.fg(statusColorFor(details), SQUARE)} ${theme.fg("toolTitle", theme.bold("workflow "))}` +
     `${theme.fg("accent", details.name ?? details.runId)} ` +
     theme.fg(
       "dim",
       `${settled}/${details.agents.length} · ${formatElapsed(details.startedAt, details.finishedAt ?? now)} · `,
     ) +
-    theme.fg(statusColor(details.status), statusWord(details.status));
+    theme.fg(statusColorFor(details), statusWordFor(details));
   if (failed) text += theme.fg("error", ` · ${failed} failed`);
   if (details.background) text += theme.fg("dim", " (background)");
   const dominant = dominantModel(details);

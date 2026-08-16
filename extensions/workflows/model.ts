@@ -212,6 +212,25 @@ export function statusColor(
   return "error";
 }
 
+/** Status color that reflects agent failures even when the script completed. */
+export function statusColorFor(
+  details: Pick<WorkflowDetails, "status" | "agents">,
+): "success" | "warning" | "error" {
+  if (details.status === "completed" && countStates(details).failed > 0) {
+    return "warning";
+  }
+  return statusColor(details.status);
+}
+
+/** Status word that names failures when the script still completed. */
+export function statusWordFor(
+  details: Pick<WorkflowDetails, "status" | "agents">,
+): string {
+  if (details.status !== "completed") return statusWord(details.status);
+  const { failed } = countStates(details);
+  return failed > 0 ? `done, ${failed} failed` : "done";
+}
+
 export function shortenHome(p: string): string {
   const home = os.homedir();
   return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
@@ -465,7 +484,7 @@ export function aggregateUsage(agents: AgentRecord[]): AgentUsage {
   return total;
 }
 
-export function countStates(details: WorkflowDetails) {
+export function countStates(details: Pick<WorkflowDetails, "agents">) {
   let done = 0;
   let failed = 0;
   let running = 0;

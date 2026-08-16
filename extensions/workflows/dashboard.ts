@@ -46,7 +46,9 @@ import {
   shortenHome,
   stateSquare,
   statusColor,
+  statusColorFor,
   statusWord,
+  statusWordFor,
   thinkingColor,
   thinkingExcerpt,
   SQUARE,
@@ -775,7 +777,7 @@ export class WorkflowDashboard {
           "dim",
           `${lifecycle} agents · ${formatElapsed(d.startedAt, d.finishedAt)} · `,
         ) +
-        theme.fg(statusColor(d.status), statusWord(d.status)) +
+        theme.fg(statusColorFor(d), statusWordFor(d)) +
         " ";
       const model = dominantModel(d);
       const left = ` ${marker} ${statusSquareFor(d, theme)} ${label}${
@@ -807,7 +809,7 @@ export class WorkflowDashboard {
         "dim",
         `${lifecycle} · ${formatElapsed(d.startedAt, d.finishedAt)} · `,
       ) +
-      theme.fg(statusColor(d.status), statusWord(d.status)) +
+      theme.fg(statusColorFor(d), statusWordFor(d)) +
       " ";
     lines.push(
       this.split(

@@ -3,6 +3,17 @@ import * as os from "node:os";
 export const DEFAULT_WORKFLOW_CONCURRENCY = 4;
 export const MAX_HOST_CAPACITY = 16;
 
+/**
+ * Protective defaults applied to budget groups the author omits entirely.
+ * Real-world failures cluster on hand-guessed budgets far below these, so
+ * omitted budgets are generous rather than unbounded: agents stay protected
+ * from runaway turns/output while authors who need more simply raise them.
+ */
+export const DEFAULT_TOTAL_TURNS = 400;
+export const DEFAULT_TOTAL_OUTPUT_TOKENS = 200_000;
+export const DEFAULT_AGENT_WALL_MS = 30 * 60_000;
+export const DEFAULT_WORKFLOW_WALL_MS = 2 * 60 * 60_000;
+
 export interface WorkflowLimits {
   concurrency?: number;
   workflow?: { wallMs?: number; idleMs?: number };
@@ -139,8 +150,24 @@ export function resolveWorkflowLimits(
   capacity: number,
 ): EffectiveWorkflowLimits {
   const hardCapacity = positiveInteger(capacity, "host capacity");
+  const total = {
+    turns: DEFAULT_TOTAL_TURNS,
+    outputTokens: DEFAULT_TOTAL_OUTPUT_TOKENS,
+    ...(requested?.total ?? {}),
+  };
+  const agent = {
+    wallMs: DEFAULT_AGENT_WALL_MS,
+    ...(requested?.agent ?? {}),
+  };
+  const workflow = {
+    wallMs: DEFAULT_WORKFLOW_WALL_MS,
+    ...(requested?.workflow ?? {}),
+  };
   return {
     ...(requested ?? {}),
+    total,
+    agent,
+    workflow,
     concurrency: Math.min(
       hardCapacity,
       requested?.concurrency ?? DEFAULT_WORKFLOW_CONCURRENCY,

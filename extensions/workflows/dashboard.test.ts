@@ -62,6 +62,8 @@ test("historical dashboard hydration normalizes usage and resolved governance", 
     concurrency: 4,
     hardCapacity: 10,
     total: { turns: 0, outputTokens: 0, costUsd: 0 },
+    agent: { wallMs: 1_800_000 },
+    workflow: { wallMs: 7_200_000 },
   });
   assert.deepEqual(details.agents[0]?.usage, {
     input: 0,

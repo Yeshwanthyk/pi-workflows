@@ -27,7 +27,7 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
   "Prepare and execute a multi-agent workflow in two deterministic steps. First submit a free-form preview with the JavaScript orchestration script; this validates and saves an immutable draft but starts no agents. Only after the user reviews it and sends a newer response may you call the tool again with only the draftId to execute the saved script, args, and background setting.",
   "Use workflows when a task benefits from several isolated subagents with distinct ownership or phase dependencies. Independent drafts may execute concurrently in background, while the process-global capacity pool bounds aggregate fan-out.",
   "The script runs as an async function body with these primitives:",
-  "• export const meta = { name, description, phases: [{ title, detail? }], limits? } — static metadata for the progress UI and optional run limits. Declare all phases up front. `limits` is a closed literal-only object: { concurrency?, workflow?: { wallMs?, idleMs? }, agent?: { wallMs?, idleMs? }, total?: { turns?, outputTokens?, costUsd? } }. Concurrency and durations are positive safe integers; turns/outputTokens are non-negative safe integers; costUsd is non-negative finite. Omitted budgets are unbounded.",
+  "• export const meta = { name, description, phases: [{ title, detail? }], limits? } — static metadata for the progress UI and optional run limits. Declare all phases up front. `limits` is a closed literal-only object: { concurrency?, workflow?: { wallMs?, idleMs? }, agent?: { wallMs?, idleMs? }, total?: { turns?, outputTokens?, costUsd? } }. Concurrency and durations are positive safe integers; turns/outputTokens are non-negative safe integers; costUsd is non-negative finite. Omitted budgets use protective defaults (400 total turns, 200k output tokens, 30-minute per-agent wall, 2-hour run wall) instead of unbounded.",
   "• phase(title) — mark the current phase at runtime (use titles from meta.phases).",
   "• await agent(prompt, { label?, phase?, schema?, model?, provider?, effort? }) — run ONE subagent in an isolated context and wait for it. Always resolves to { ok, output, structured?, error? }. Check `ok` before using the result. When you pass a JSON `schema`, `structured` holds the validated object on success. `model`/`provider` override the session model; `effort` sets the thinking level (off|minimal|low|medium|high|xhigh|max). Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate, manage task lists, or ask the user.",
   "• await parallel([() => agent(...), () => agent(...)], { concurrency? }) — run zero-argument agent thunks concurrently and return results in order. Omitted concurrency defaults to min(4, the run cap); explicit concurrency may use the resolved run cap. A process-global host pool remains authoritative.",
@@ -58,6 +58,8 @@ export const WORKFLOW_PROMPT_GUIDELINES = [
   "After a draft is prepared, show its preview and review instructions before requesting approval; never reduce the result to a bare draft ID.",
   "When implementation work shares files, sequence fresh writer agents instead of packing the whole change into one writer. Each writer should deliver one complete outcome with focused proof. Pass concise findings and relevant report or artifact paths forward instead of raw transcripts or mandatory rediscovery. When several writers contribute to one operator outcome, finish with one integration/proof agent that checks the complete result and fixes only integration defects.",
   "Use model/provider/effort intentionally. Prefer useful implementation and focused verification over reviewer swarms or exhaustive exploration.",
+  "Size budgets from the task, not guesses: total.turns is shared across every agent, so allow roughly 40-60 turns per agent plus headroom for verification phases (reviewers burn turns re-running checks). outputTokens is also shared and includes whole-file reads and bash dumps, so budget ~5-10k output tokens per expected agent deliverable. Omit a budget group to use the protective defaults rather than setting tight caps; if you must cap, keep the caps above these floors (turns >= 40, outputTokens >= 20k, agent wallMs >= 10min) or the run may die mid-work.",
+  "Pin provider on every agent when auth differs from the session default (e.g. agent(..., { provider: 'openai-codex' })); an unauthenticated default provider fails every agent at launch.",
   "Independent approved drafts may run concurrently in background; the shared host pool bounds their aggregate concurrency.",
   "In workflow scripts, agent() never throws — always check `.ok` on its result before using `.output`/`.structured`.",
 ];
@@ -98,7 +100,11 @@ export function buildWorkflowDraftMessage(options: {
   }
   lines.push(
     "",
-    `Configured limits: ${options.meta.limits ? JSON.stringify(options.meta.limits) : "unbounded"}`,
+    `Configured limits: ${options.meta.limits ? JSON.stringify(options.meta.limits) : "defaults (400 turns / 200k out / 30m agent wall / 2h run wall)"}`,
+  );
+  const advisory = budgetAdvisory(options.meta.limits);
+  if (advisory) lines.push(advisory);
+  lines.push(
     "Approve only after reviewing it; execution requires a newer, explicit user response.",
   );
   return lines.join("\n");
@@ -170,4 +176,33 @@ export function buildBackgroundWorkflowLaunchResult(options: {
     `Artifacts: ${shortenHome(options.runDir)}`,
     "You'll receive a follow-up message when it finishes; /workflows shows progress.",
   ].join("\n");
+}
+
+/** Flags implausibly tight budgets before a run so drafts stop the sizing loop. */
+export function budgetAdvisory(
+  limits: WorkflowMeta["limits"],
+): string | undefined {
+  if (!limits) return undefined;
+  const notes: string[] = [];
+  const turns = limits.total?.turns;
+  if (turns !== undefined && turns < 40) {
+    notes.push(
+      `total.turns:${turns} may be tight — the pool is shared across all agents (default 400)`,
+    );
+  }
+  const outputTokens = limits.total?.outputTokens;
+  if (outputTokens !== undefined && outputTokens < 20_000) {
+    notes.push(
+      `total.outputTokens:${outputTokens} may be tight — shared across agents, includes reads/bash (default 200k)`,
+    );
+  }
+  const wallMs = limits.agent?.wallMs;
+  if (wallMs !== undefined && wallMs < 10 * 60_000) {
+    notes.push(
+      `agent.wallMs:${wallMs} may be tight for implementation agents (default 30m)`,
+    );
+  }
+  return notes.length > 0
+    ? `\nBudget advisory: ${notes.join("; ")}.`
+    : undefined;
 }

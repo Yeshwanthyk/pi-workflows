@@ -35,6 +35,17 @@ test("static limits accept the closed schema and resolve once", () => {
   assert.deepEqual(resolveWorkflowLimits(undefined, 16), {
     concurrency: 4,
     hardCapacity: 16,
+    total: { turns: 400, outputTokens: 200_000 },
+    agent: { wallMs: 1_800_000 },
+    workflow: { wallMs: 7_200_000 },
+  });
+  // Author-specified fields win; omitted groups keep protective defaults.
+  assert.deepEqual(resolveWorkflowLimits({ total: { turns: 45 } }, 8), {
+    total: { turns: 45, outputTokens: 200_000 },
+    agent: { wallMs: 1_800_000 },
+    workflow: { wallMs: 7_200_000 },
+    concurrency: 4,
+    hardCapacity: 8,
   });
 });
 

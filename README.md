@@ -19,6 +19,11 @@ Reload an existing Pi session with `/reload`.
 - `/workflow-draft [draftId]` source-split review for pending immutable drafts
 - `/workflows` dashboard and run inspection
 - DSL primitives: `phase()`, `agent()`, `parallel()`, and `args`
+- Protective budget defaults (omitted `limits` groups are no longer
+  unbounded): 400 total turns, 200k total output tokens, 30-minute
+  per-agent wall, 2-hour run wall. Drafts warn when declared budgets fall
+  below sizing floors; `skills/workflow-budgets/SKILL.md` documents the
+  sizing rules for authors
 
 Drafts are written under `~/.pi/agent/workflows/drafts/<draftId>/draft.json`; run artifacts are written under `~/.pi/agent/workflows/<runId>/`. Run `/workflow-draft <draftId>` to review the plan and exact immutable source side by side; pressing `a` only prefills an explicit approval message for you to submit. Multiple approved background workflows share a process-global capacity pool.
 

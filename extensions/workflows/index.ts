@@ -77,7 +77,9 @@ import {
   resultJson,
   stateSquare,
   statusColor,
+  statusColorFor,
   statusWord,
+  statusWordFor,
   thinkingColor,
   thinkingExcerpt,
   SQUARE,
@@ -958,7 +960,13 @@ export default function workflows(pi: ExtensionAPI) {
                 if (outcome.ok) {
                   delete record.error;
                 } else {
-                  record.error = outcome.error ?? "Agent failed";
+                  // An agent aborted by the run (e.g. a sibling tripped a
+                  // budget) gets the authoritative termination cause rather
+                  // than a generic child-teardown abort message.
+                  record.error =
+                    outcome.aborted && controller.termination
+                      ? controller.termination.message
+                      : (outcome.error ?? "Agent failed");
                 }
                 emit();
               });
@@ -1292,10 +1300,10 @@ export default function workflows(pi: ExtensionAPI) {
       const lifecycle = formatAgentLifecycle(details);
       const elapsed = formatElapsed(details.startedAt, details.finishedAt);
       let header =
-        `${theme.fg(statusColor(details.status), SQUARE)} ${theme.fg("toolTitle", theme.bold("workflow "))}` +
+        `${theme.fg(statusColorFor(details), SQUARE)} ${theme.fg("toolTitle", theme.bold("workflow "))}` +
         `${theme.fg("accent", details.name ?? details.runId)} ` +
         theme.fg("dim", `${lifecycle} · ${elapsed} · `) +
-        theme.fg(statusColor(details.status), statusWord(details.status));
+        theme.fg(statusColorFor(details), statusWordFor(details));
       if (failed) header += theme.fg("error", ` · ${failed} failed`);
       if (details.background) header += theme.fg("dim", " (background)");
       if (details.status === "running" && details.currentPhase) {

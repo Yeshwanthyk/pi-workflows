@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  budgetAdvisory,
   buildWorkflowAgentPrompt,
   buildWorkflowDraftMessage,
   WORKFLOW_PROMPT_GUIDELINES,
@@ -20,6 +21,25 @@ test("workflow children execute their assigned outcome without replanning", () =
   assert.match(prompt, /avoid duplicating other agents/);
   assert.match(prompt, /do not expand into later roadmap work/);
   assert.match(prompt, /Assigned workflow step:\nInspect only src\/parser\.ts/);
+});
+
+test("budget advisory flags tight shared budgets and stays quiet on defaults", () => {
+  assert.equal(
+    budgetAdvisory({ total: { turns: 30, outputTokens: 10_000 } }),
+    "\nBudget advisory: total.turns:30 may be tight — the pool is shared across all agents (default 400); total.outputTokens:10000 may be tight — shared across agents, includes reads/bash (default 200k).",
+  );
+  assert.equal(
+    budgetAdvisory({ agent: { wallMs: 5 * 60_000 } }),
+    "\nBudget advisory: agent.wallMs:300000 may be tight for implementation agents (default 30m).",
+  );
+  assert.equal(
+    budgetAdvisory({
+      total: { turns: 120, outputTokens: 50_000 },
+      agent: { wallMs: 15 * 60_000 },
+    }),
+    undefined,
+  );
+  assert.equal(budgetAdvisory(undefined), undefined);
 });
 
 test("workflow authoring guidance favors complete outcomes in fresh agents", () => {
