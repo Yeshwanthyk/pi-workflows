@@ -41,6 +41,22 @@ function captureWorkflowTool(): CapturedTool {
   return tool;
 }
 
+type CapturedHandler = (...args: unknown[]) => unknown;
+
+function captureWorkflowHandlers() {
+  const handlers = new Map<string, CapturedHandler>();
+  const pi = {
+    on(event: string, handler: CapturedHandler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool() {},
+  } as unknown as ExtensionAPI;
+
+  workflows(pi);
+  return handlers;
+}
+
 const theme = {
   fg: (_color: string, text: string) => text,
   bold: (text: string) => text,
@@ -49,6 +65,54 @@ const theme = {
 function rendered(component: Component) {
   return component.render(240).join("\n");
 }
+
+test("workflow flow widget is cleared on shutdown without an active run", async () => {
+  const handlers = captureWorkflowHandlers();
+  const widgetCalls: Array<{
+    key: string;
+    content: string[] | undefined;
+    placement: string | undefined;
+  }> = [];
+  const ui = {
+    theme,
+    setWidget(
+      key: string,
+      content: string[] | undefined,
+      options?: { placement?: string },
+    ) {
+      widgetCalls.push({
+        key,
+        content,
+        placement: options?.placement,
+      });
+    },
+    setStatus() {},
+  };
+  const context = {
+    hasUI: true,
+    ui,
+    sessionManager: { getSessionId: () => "session-flow" },
+  };
+
+  const sessionStart = handlers.get("session_start");
+  const sessionShutdown = handlers.get("session_shutdown");
+  assert.ok(sessionStart);
+  assert.ok(sessionShutdown);
+
+  await sessionStart({ type: "session_start", reason: "startup" }, context);
+  assert.deepEqual(widgetCalls.at(-1), {
+    key: "workflow-flow",
+    content: undefined,
+    placement: "belowEditor",
+  });
+
+  await sessionShutdown({ type: "session_shutdown", reason: "quit" }, context);
+  assert.deepEqual(widgetCalls.at(-1), {
+    key: "workflow-flow",
+    content: undefined,
+    placement: "belowEditor",
+  });
+});
 
 test("streaming workflow drafts expose preview and save boundary", () => {
   const tool = captureWorkflowTool();

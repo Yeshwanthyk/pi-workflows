@@ -108,6 +108,11 @@ import {
   workflowActiveWorkItem,
 } from "./activity-protocol.ts";
 import { renderWorkflowActivityCard } from "./activity-card.ts";
+import {
+  hasRecentWorkflowTerminalFlash,
+  renderWorkflowFlow,
+  WORKFLOW_FLOW_FLASH_TTL_MS,
+} from "./flow-view.ts";
 
 const PREVIEW_LENGTH = 200;
 const EMIT_INTERVAL_MS = 120;
@@ -318,10 +323,52 @@ export default function workflows(pi: ExtensionAPI) {
     { runId: string; invalidate: () => void }
   >();
   let activityTick: ReturnType<typeof setInterval> | undefined;
+  /** UI and session identity for the additive workflow-owned widget. */
+  let lastUi: ExtensionContext["ui"] | undefined;
+  let uiSessionId: string | undefined;
   const activeDetails = () =>
     new Map(
       [...activeRuns].map(([runId, run]) => [runId, run.details] as const),
     );
+
+  const updateWorkflowWidget = () => {
+    const ui = lastUi;
+    const sessionId = uiSessionId;
+    if (!ui || !sessionId) return;
+    try {
+      const lines = renderWorkflowFlow(
+        {
+          active: [...activeRuns.values()].map((run) => run.details),
+          finished: finishedDetails.values(),
+          sessionId,
+        },
+        ui.theme,
+      );
+      ui.setWidget("workflow-flow", lines.length > 0 ? lines : undefined, {
+        placement: "belowEditor",
+      });
+    } catch {
+      // UI may be unavailable during session transitions.
+    }
+  };
+
+  const clearWorkflowWidget = (ui = lastUi) => {
+    try {
+      ui?.setWidget("workflow-flow", undefined, { placement: "belowEditor" });
+    } catch {
+      // UI may already be disposed during shutdown.
+    }
+  };
+
+  const hasWorkflowFlowActivity = () =>
+    activeRuns.size > 0 ||
+    (uiSessionId !== undefined &&
+      hasRecentWorkflowTerminalFlash(
+        finishedDetails.values(),
+        uiSessionId,
+        Date.now(),
+        WORKFLOW_FLOW_FLASH_TTL_MS,
+      ));
 
   const invalidateRun = (runId: string) => {
     for (const row of toolRowInvalidators.values()) {
@@ -344,6 +391,7 @@ export default function workflows(pi: ExtensionAPI) {
       });
     }
     invalidateRun(details.runId);
+    updateWorkflowWidget();
   };
 
   const rememberFinished = (details: WorkflowDetails) => {
@@ -354,22 +402,25 @@ export default function workflows(pi: ExtensionAPI) {
       finishedDetails.delete(oldest);
     }
     publishWorkflowActivity(details);
+    syncActivityTick();
   };
 
   const syncActivityTick = () => {
-    if (activeRuns.size > 0 && !activityTick) {
+    if (hasWorkflowFlowActivity() && !activityTick) {
       activityTick = setInterval(() => {
         for (const runId of activeRuns.keys()) invalidateRun(runId);
+        updateWorkflowWidget();
+        if (!hasWorkflowFlowActivity()) syncActivityTick();
       }, 1_000);
       activityTick.unref?.();
-    } else if (activeRuns.size === 0 && activityTick) {
+    } else if (!hasWorkflowFlowActivity() && activityTick) {
       clearInterval(activityTick);
       activityTick = undefined;
+      updateWorkflowWidget();
     }
   };
 
   /** Finished counts remain visible until the dashboard acknowledges them. */
-  let lastUi: ExtensionContext["ui"] | undefined;
   let completedRuns = 0;
   let failedRuns = 0;
   const updateIndicator = () => {
@@ -401,11 +452,17 @@ export default function workflows(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", (_event, ctx) => {
-    if (ctx.hasUI) lastUi = ctx.ui;
+    clearWorkflowWidget();
+    lastUi = ctx.hasUI ? ctx.ui : undefined;
+    uiSessionId = ctx.sessionManager.getSessionId();
+    updateWorkflowWidget();
     updateIndicator();
   });
 
   pi.on("session_shutdown", async () => {
+    const closingUi = lastUi;
+    clearWorkflowWidget(closingUi);
+    uiSessionId = undefined;
     const runs = [...activeRuns.values()];
     for (const run of runs) {
       run.controller.abort(
@@ -442,7 +499,8 @@ export default function workflows(pi: ExtensionAPI) {
         key: `workflow:${run.details.runId}`,
       });
     }
-    lastUi?.setStatus("workflows", undefined);
+    closingUi?.setStatus("workflows", undefined);
+    clearWorkflowWidget(closingUi);
     lastUi = undefined;
   });
 
