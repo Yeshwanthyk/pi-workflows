@@ -13,6 +13,7 @@ function fixture() {
   });
   const details: WorkflowDetails = {
     runId: "wf_fixture",
+    sessionId: "session-a",
     status: "running",
     background: true,
     startedAt: Date.now(),
@@ -48,12 +49,14 @@ test("clean cancellation waits for run completion and reports aborted", async ()
   ]);
 
   let finished = false;
-  const cancelling = cancelActiveWorkflowRun(active, details.runId).then(
-    (result) => {
-      finished = true;
-      return result;
-    },
-  );
+  const cancelling = cancelActiveWorkflowRun(
+    active,
+    details.runId,
+    "session-a",
+  ).then((result) => {
+    finished = true;
+    return result;
+  });
   await Promise.resolve();
   assert.equal(controller.termination?.code, "manual_abort");
   assert.equal(finished, false, "cancellation must wait for final projection");
@@ -68,6 +71,17 @@ test("clean cancellation rejects inactive runs", async () => {
     cancelActiveWorkflowRun(new Map(), "wf_missing"),
     /not active/,
   );
+});
+
+test("cancellation cannot target a run from another session", async () => {
+  const { controller, details } = fixture();
+  const active = new Map([[details.runId, { controller, details }]]);
+
+  await assert.rejects(
+    cancelActiveWorkflowRun(active, details.runId, "session-b"),
+    /not active in this session/,
+  );
+  assert.equal(controller.termination, undefined);
 });
 
 test("a prior failure remains authoritative during cancellation", async () => {

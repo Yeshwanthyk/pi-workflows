@@ -76,9 +76,7 @@ import {
   phaseGroups,
   resultJson,
   stateSquare,
-  statusColor,
   statusColorFor,
-  statusWord,
   statusWordFor,
   thinkingColor,
   thinkingExcerpt,
@@ -573,8 +571,12 @@ export default function workflows(pi: ExtensionAPI) {
       "Cancel one exact active workflow run cleanly through its controller, wait for its agents and sandbox to settle, and report the persisted terminal status.",
     parameters: WorkflowCancelParams,
 
-    async execute(_toolCallId, params) {
-      const details = await cancelActiveWorkflowRun(activeRuns, params.runId);
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const details = await cancelActiveWorkflowRun(
+        activeRuns,
+        params.runId,
+        ctx.sessionManager.getSessionId(),
+      );
       const message =
         details.status === "aborted"
           ? `Workflow ${params.runId} aborted cleanly.`

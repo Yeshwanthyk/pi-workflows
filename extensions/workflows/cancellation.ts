@@ -11,9 +11,15 @@ export interface ActiveWorkflowRun {
 export async function cancelActiveWorkflowRun(
   activeRuns: ReadonlyMap<string, ActiveWorkflowRun>,
   runId: string,
+  sessionId?: string,
 ): Promise<WorkflowDetails> {
   const run = activeRuns.get(runId);
-  if (!run) throw new Error(`Workflow ${runId} is not active`);
+  if (
+    !run ||
+    (sessionId !== undefined && run.details.sessionId !== sessionId)
+  ) {
+    throw new Error(`Workflow ${runId} is not active in this session`);
+  }
 
   run.controller.abort(
     new WorkflowTerminationError(

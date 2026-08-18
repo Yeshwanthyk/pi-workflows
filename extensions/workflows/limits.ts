@@ -153,18 +153,18 @@ export function resolveWorkflowLimits(
   const total = {
     turns: DEFAULT_TOTAL_TURNS,
     outputTokens: DEFAULT_TOTAL_OUTPUT_TOKENS,
-    ...(requested?.total ?? {}),
+    ...requested?.total,
   };
   const agent = {
     wallMs: DEFAULT_AGENT_WALL_MS,
-    ...(requested?.agent ?? {}),
+    ...requested?.agent,
   };
   const workflow = {
     wallMs: DEFAULT_WORKFLOW_WALL_MS,
-    ...(requested?.workflow ?? {}),
+    ...requested?.workflow,
   };
   return {
-    ...(requested ?? {}),
+    ...requested,
     total,
     agent,
     workflow,
