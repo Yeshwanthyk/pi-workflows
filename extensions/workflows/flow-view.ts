@@ -1,7 +1,6 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import {
   countStates,
-  formatElapsed,
   SQUARE,
   stateSquare,
   statusColorFor,
@@ -11,10 +10,9 @@ import {
 } from "./model.ts";
 
 export const WORKFLOW_FLOW_FLASH_TTL_MS = 4_000;
-const QUIET_AFTER_MS = 30_000;
 const DEFAULT_MAX_LINES = 10;
 const DEFAULT_MAX_WIDTH = 120;
-const MAX_AGENTS_PER_RUN = 3;
+const MAX_AGENTS_PER_RUN = 1;
 
 export interface WorkflowFlowData {
   active: Iterable<WorkflowDetails>;
@@ -43,39 +41,6 @@ function bounded(value: string, maxLength: number): string {
     : `${text.slice(0, Math.max(1, maxLength - 1))}…`;
 }
 
-function lastActivity(details: WorkflowDetails): number {
-  return Math.max(
-    details.startedAt,
-    ...details.agents.map(
-      (agent) => agent.lastActivityAt ?? agent.startedAt ?? agent.queuedAt,
-    ),
-  );
-}
-
-function phasePipeline(details: WorkflowDetails, theme: Theme): string {
-  if (details.phases.length === 0) {
-    return details.currentPhase
-      ? theme.fg("muted", `› ${bounded(details.currentPhase, 42)}`)
-      : "";
-  }
-
-  const currentIndex = details.currentPhase
-    ? details.phases.findIndex((phase) => phase.title === details.currentPhase)
-    : -1;
-  return details.phases
-    .map((phase, index) => {
-      const marker =
-        details.status === "completed" ||
-        (currentIndex >= 0 && index < currentIndex)
-          ? theme.fg("success", "✓")
-          : index === currentIndex
-            ? theme.fg("accent", "›")
-            : theme.fg("dim", "·");
-      return `${marker} ${bounded(phase.title, 28)}`;
-    })
-    .join(theme.fg("dim", " → "));
-}
-
 function terminalFlash(details: WorkflowDetails, theme: Theme): string {
   const status =
     details.status === "completed"
@@ -87,11 +52,7 @@ function terminalFlash(details: WorkflowDetails, theme: Theme): string {
   return `${theme.fg(color, SQUARE)} ${theme.bold("workflow")} ${theme.fg("accent", bounded(details.name ?? details.runId, 42))} ${theme.fg("dim", "·")} ${theme.fg(color, status)}`;
 }
 
-function activeRunLines(
-  details: WorkflowDetails,
-  theme: Theme,
-  now: number,
-): string[] {
+function activeRunLines(details: WorkflowDetails, theme: Theme): string[] {
   const { done, failed, running, queued } = countStates(details);
   const settled = done + failed;
   const status =
@@ -99,6 +60,9 @@ function activeRunLines(
   const header =
     `${theme.fg(statusColorFor(details), SQUARE)} ${theme.bold("workflow")} ` +
     `${theme.fg("accent", bounded(details.name ?? details.runId, 42))} ` +
+    (details.currentPhase
+      ? theme.fg("muted", `· ${bounded(details.currentPhase, 28)} `)
+      : "") +
     theme.fg(
       "dim",
       `· ${settled}/${details.agents.length} agents${running ? ` · ${running} running` : ""}${queued ? ` · ${queued} queued` : ""} · `,
@@ -106,38 +70,25 @@ function activeRunLines(
     theme.fg(statusColorFor(details), status);
 
   const lines = [header];
-  const pipeline = phasePipeline(details, theme);
-  if (pipeline) lines.push(`  ${pipeline}`);
-
   const visibleAgents = details.agents
     .filter((agent) => agent.state === "running" || agent.state === "queued")
     .sort((a, b) => {
       if (a.state !== b.state) return a.state === "running" ? -1 : 1;
       return a.index - b.index;
     });
-  const quiet = running === 0 || now - lastActivity(details) >= QUIET_AFTER_MS;
   for (const agent of visibleAgents.slice(0, MAX_AGENTS_PER_RUN)) {
     const tool = agent.currentTools?.[0];
     let activity = agent.state === "queued" ? "queued" : "working";
     if (tool) {
       const args = tool.argsPreview ? ` ${bounded(tool.argsPreview, 56)}` : "";
-      activity = `${bounded(`${tool.name}${args}`, 82)} · ${formatElapsed(tool.startedAt, now)}`;
-    } else if (agent.state === "running" && quiet) {
-      activity = `quiet · ${formatElapsed(agent.lastActivityAt ?? agent.startedAt, now)} idle`;
+      activity = bounded(`${tool.name}${args}`, 82);
     }
     lines.push(
       `  ${stateSquare(agent.state, theme)} ${theme.fg("accent", bounded(agent.label, 30))} ${theme.fg("dim", `· ${activity}`)}`,
     );
   }
-  if (visibleAgents.length > MAX_AGENTS_PER_RUN) {
-    lines.push(
-      `  ${theme.fg("dim", `+${visibleAgents.length - MAX_AGENTS_PER_RUN} more agent${visibleAgents.length - MAX_AGENTS_PER_RUN === 1 ? "" : "s"}`)}`,
-    );
-  }
   if (visibleAgents.length === 0 && details.status === "running") {
-    lines.push(
-      `  ${theme.fg("dim", quiet ? "quiet · between phases" : "starting agents")}`,
-    );
+    lines.push(`  ${theme.fg("dim", "between phases")}`);
   }
   return lines;
 }
@@ -212,7 +163,7 @@ export function renderWorkflowFlow(
   };
 
   for (const details of active) {
-    for (const line of activeRunLines(details, theme, now)) {
+    for (const line of activeRunLines(details, theme)) {
       append(line);
       if (lines.length >= maxLines) break;
     }
@@ -225,6 +176,11 @@ export function renderWorkflowFlow(
   return lines
     .slice(0, maxLines)
     .map((line) => truncateToWidth(line, maxWidth, "…"));
+}
+
+/** Stable cache key for avoiding destructive no-op widget replacement. */
+export function workflowFlowSignature(lines: readonly string[]): string {
+  return JSON.stringify(lines);
 }
 
 /** Small projection helper used by the owning extension's refresh tick. */

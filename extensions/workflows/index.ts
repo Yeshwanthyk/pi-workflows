@@ -30,7 +30,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Key, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { formatActivityStatus } from "../shared/activity-status.ts";
 import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
@@ -111,11 +111,20 @@ import { renderWorkflowActivityCard } from "./activity-card.ts";
 import {
   hasRecentWorkflowTerminalFlash,
   renderWorkflowFlow,
+  workflowFlowSignature,
   WORKFLOW_FLOW_FLASH_TTL_MS,
 } from "./flow-view.ts";
 
 const PREVIEW_LENGTH = 200;
 const EMIT_INTERVAL_MS = 120;
+
+/** Pure seam for deduplicating identical below-editor widget projections. */
+export function workflowWidgetNeedsUpdate(
+  previousSignature: string,
+  lines: readonly string[],
+): boolean {
+  return previousSignature !== workflowFlowSignature(lines);
+}
 
 /** What `agent()` resolves to inside the script. */
 interface ScriptAgentResult {
@@ -326,6 +335,8 @@ export default function workflows(pi: ExtensionAPI) {
   /** UI and session identity for the additive workflow-owned widget. */
   let lastUi: ExtensionContext["ui"] | undefined;
   let uiSessionId: string | undefined;
+  let workflowWidgetSignature = workflowFlowSignature([]);
+  let workflowWidgetVisible = false;
   const activeDetails = () =>
     new Map(
       [...activeRuns].map(([runId, run]) => [runId, run.details] as const),
@@ -344,17 +355,31 @@ export default function workflows(pi: ExtensionAPI) {
         },
         ui.theme,
       );
-      ui.setWidget("workflow-flow", lines.length > 0 ? lines : undefined, {
-        placement: "belowEditor",
-      });
+      const signature = workflowFlowSignature(lines);
+      if (!workflowWidgetNeedsUpdate(workflowWidgetSignature, lines)) return;
+      if (lines.length === 0) {
+        if (!workflowWidgetVisible) {
+          workflowWidgetSignature = signature;
+          return;
+        }
+        ui.setWidget("workflow-flow", undefined, { placement: "belowEditor" });
+        workflowWidgetVisible = false;
+      } else {
+        ui.setWidget("workflow-flow", lines, { placement: "belowEditor" });
+        workflowWidgetVisible = true;
+      }
+      workflowWidgetSignature = signature;
     } catch {
       // UI may be unavailable during session transitions.
     }
   };
 
   const clearWorkflowWidget = (ui = lastUi) => {
+    if (!workflowWidgetVisible) return;
     try {
       ui?.setWidget("workflow-flow", undefined, { placement: "belowEditor" });
+      workflowWidgetVisible = false;
+      workflowWidgetSignature = workflowFlowSignature([]);
     } catch {
       // UI may already be disposed during shutdown.
     }
@@ -402,20 +427,30 @@ export default function workflows(pi: ExtensionAPI) {
       finishedDetails.delete(oldest);
     }
     publishWorkflowActivity(details);
-    syncActivityTick();
+    syncActivityTick(true);
   };
 
-  const syncActivityTick = () => {
-    if (hasWorkflowFlowActivity() && !activityTick) {
+  const syncActivityTick = (refresh = false) => {
+    const hasActivity = hasWorkflowFlowActivity();
+    if (!hasActivity) {
+      const wasRunning = activityTick !== undefined;
+      if (activityTick) clearInterval(activityTick);
+      activityTick = undefined;
+      if (wasRunning || refresh) updateWorkflowWidget();
+      return;
+    }
+    if (!activityTick) {
+      updateWorkflowWidget();
       activityTick = setInterval(() => {
         for (const runId of activeRuns.keys()) invalidateRun(runId);
         updateWorkflowWidget();
-        if (!hasWorkflowFlowActivity()) syncActivityTick();
+        if (!hasWorkflowFlowActivity()) {
+          clearInterval(activityTick!);
+          activityTick = undefined;
+        }
       }, 1_000);
       activityTick.unref?.();
-    } else if (!hasWorkflowFlowActivity() && activityTick) {
-      clearInterval(activityTick);
-      activityTick = undefined;
+    } else if (refresh) {
       updateWorkflowWidget();
     }
   };
@@ -504,6 +539,34 @@ export default function workflows(pi: ExtensionAPI) {
     lastUi = undefined;
   });
 
+  const openWorkflowDashboard = async (
+    ctx: ExtensionContext,
+    initialRunId?: string,
+  ) => {
+    if (ctx.mode !== "tui") {
+      ctx.ui.notify("Workflow dashboard requires interactive mode.", "warning");
+      return;
+    }
+    lastUi = ctx.ui;
+    await showWorkflowDashboard(
+      ctx,
+      activeDetails,
+      initialRunId,
+      () => uiSessionId === ctx.sessionManager.getSessionId(),
+    );
+    // Opening the dashboard acknowledges finished runs.
+    completedRuns = 0;
+    failedRuns = 0;
+    updateIndicator();
+  };
+
+  pi.registerShortcut(Key.ctrlShift("a"), {
+    description: "Open workflows dashboard",
+    handler: async (ctx) => {
+      await openWorkflowDashboard(ctx);
+    },
+  });
+
   pi.registerCommand("workflow-draft", {
     description: "Review a pending workflow draft and its exact source",
     getArgumentCompletions: (prefix) => {
@@ -579,17 +642,7 @@ export default function workflows(pi: ExtensionAPI) {
     handler: async (rawArgs, ctx) => {
       const arg = rawArgs.trim();
       if (ctx.mode === "tui") {
-        lastUi = ctx.ui;
-        await showWorkflowDashboard(
-          ctx,
-          activeDetails,
-          arg || undefined,
-          () => uiSessionId === ctx.sessionManager.getSessionId(),
-        );
-        // Opening the dashboard acknowledges finished runs.
-        completedRuns = 0;
-        failedRuns = 0;
-        updateIndicator();
+        await openWorkflowDashboard(ctx, arg || undefined);
         return;
       }
       // Non-TUI fallback: plain text listing.

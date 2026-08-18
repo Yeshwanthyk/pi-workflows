@@ -6,6 +6,7 @@ import { emptyUsage, type WorkflowDetails } from "./model.ts";
 import {
   hasRecentWorkflowTerminalFlash,
   renderWorkflowFlow,
+  workflowFlowSignature,
 } from "./flow-view.ts";
 
 initTheme("dark");
@@ -78,7 +79,7 @@ function details(overrides: Partial<WorkflowDetails> = {}): WorkflowDetails {
   };
 }
 
-test("flow is phase-first and shows exact live tools plus queued agents", () => {
+test("flow uses one compact run summary and one lead agent line", () => {
   const lines = renderWorkflowFlow(
     { active: [details()], finished: [], sessionId: "session-a" },
     theme,
@@ -86,17 +87,20 @@ test("flow is phase-first and shows exact live tools plus queued agents", () => 
   );
   const output = lines.join("\n");
 
-  assert.equal(lines.length, 5);
+  assert.equal(lines.length, 3);
   assert.match(output, /workflows · 1 active/);
-  assert.match(output, /✓ Inspect → › Build → · Report/);
+  assert.match(output, /workflow Release train · Build/);
   assert.match(
     output,
-    /builder · write_file extensions\/workflows\/flow-view\.ts · 2s/,
+    /builder · write_file extensions\/workflows\/flow-view\.ts/,
   );
-  assert.match(output, /reporter · queued/);
+  assert.doesNotMatch(
+    output,
+    /✓ Inspect|· Report|reporter · queued|more agent/,
+  );
 });
 
-test("flow renders quiet running work and bounds the projection", () => {
+test("flow has stable generic activity and stays within its width bound", () => {
   const quiet = details({
     agents: [
       {
@@ -112,9 +116,26 @@ test("flow renders quiet running work and bounds the projection", () => {
     { now: 40_000, maxLines: 10, maxWidth: 48 },
   );
 
-  assert.match(lines.join("\n"), /quiet/);
+  assert.match(lines.join("\n"), /builder · working/);
+  assert.doesNotMatch(lines.join("\n"), /quiet|idle/);
   assert.ok(lines.every((line) => visibleWidth(line) <= 48));
   assert.ok(lines.length <= 10);
+});
+
+test("flow output is byte-stable across elapsed refresh ticks", () => {
+  const first = renderWorkflowFlow(
+    { active: [details()], finished: [], sessionId: "session-a" },
+    theme,
+    { now: 6_000 },
+  );
+  const later = renderWorkflowFlow(
+    { active: [details()], finished: [], sessionId: "session-a" },
+    theme,
+    { now: 36_000 },
+  );
+
+  assert.deepEqual(later, first);
+  assert.equal(workflowFlowSignature(later), workflowFlowSignature(first));
 });
 
 test("terminal flashes are session-scoped and expire after the short TTL", () => {
