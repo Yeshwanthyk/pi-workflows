@@ -23,11 +23,12 @@ import {
   matchesKey,
   truncateToWidth,
   visibleWidth,
-  wrapTextWithAnsi,
   type TUI,
 } from "@earendil-works/pi-tui";
 import { loadWorkflowArtifacts, normalizeTranscript } from "./artifacts.ts";
 import { normalizeEffectiveWorkflowLimits } from "./limits.ts";
+import { buildTranscriptLines } from "./transcript.ts";
+import { showWorkflowAgentPane, type AgentSelection } from "./agent-pane.ts";
 import {
   agentContext,
   countStates,
@@ -55,7 +56,6 @@ import {
   type Theme,
   type AgentRecord,
   type PhaseGroup,
-  type TranscriptEntry,
   type WorkflowDetails,
 } from "./model.ts";
 
@@ -379,6 +379,11 @@ export class WorkflowDashboard {
   private sessionId: string;
   private referencedRunIds: ReadonlySet<string>;
   private close: () => void;
+  private openAgentPane?: (
+    selection: AgentSelection,
+    details: WorkflowDetails,
+  ) => void;
+  private isSessionActive: () => boolean;
 
   constructor(
     tui: TUI,
@@ -389,6 +394,11 @@ export class WorkflowDashboard {
     referencedRunIds: ReadonlySet<string>,
     close: () => void,
     initialRunId?: string,
+    openAgentPane?: (
+      selection: AgentSelection,
+      details: WorkflowDetails,
+    ) => void,
+    isSessionActive: () => boolean = () => true,
   ) {
     this.tui = tui;
     this.theme = theme;
@@ -397,6 +407,8 @@ export class WorkflowDashboard {
     this.sessionId = sessionId;
     this.referencedRunIds = referencedRunIds;
     this.close = close;
+    this.openAgentPane = openAgentPane;
+    this.isSessionActive = isSessionActive;
     this.refresh();
     if (initialRunId) {
       const entry = this.entries.find(
@@ -409,6 +421,11 @@ export class WorkflowDashboard {
       }
     }
     this.timer = setInterval(() => {
+      if (!this.isSessionActive()) {
+        this.dispose();
+        this.close();
+        return;
+      }
       if (
         this.entries.some((e) => e.live) ||
         this.current?.live ||
@@ -604,6 +621,14 @@ export class WorkflowDashboard {
           this.agentIndex = Math.max(0, agents.length - 1);
         } else if (left || cancel) {
           this.detailFocus = "phases";
+        } else if (data === "o" && this.selectedAgent() && this.current) {
+          this.openAgentPane?.(
+            {
+              runId: this.current.runId,
+              agentIndex: this.selectedAgent()!.index,
+            },
+            this.current.details,
+          );
         } else if (confirm && this.selectedAgent()) {
           this.transcriptScroll = 0;
           this.view = "transcript";
@@ -995,82 +1020,25 @@ export class WorkflowDashboard {
     const hint =
       this.detailFocus === "phases"
         ? `j/k select phase · l/${this.keys("tui.editor.cursorRight")}/${this.keys("tui.select.confirm")} agents · ${this.keys("tui.select.cancel")} back · s save report`
-        : `j/k select agent · h/${this.keys("tui.editor.cursorLeft")}/${this.keys("tui.select.cancel")} phases · ${this.keys("tui.select.confirm")} transcript · s save report`;
+        : `j/k select agent · o inspect · h/${this.keys("tui.editor.cursorLeft")}/${this.keys("tui.select.cancel")} phases · ${this.keys("tui.select.confirm")} transcript · s save report`;
     lines.push(this.hintLine(hint, width));
     return lines;
   }
 
   private transcriptRows(agent: AgentRecord, width: number): string[] {
-    const theme = this.theme;
-    const rows: string[] = [];
     if (agent.transcript.length === 0) {
       return [
-        theme.fg(
+        this.theme.fg(
           "dim",
           " transcript unavailable (this run predates transcript capture)",
         ),
       ];
     }
-
-    for (const entry of agent.transcript) {
-      // Tool calls/results render as regular chat-style tool blocks.
-      if (entry.role === "tool" || entry.role === "toolResult") {
-        rows.push(...this.transcriptToolBlock(entry, width));
-        rows.push("");
-        continue;
-      }
-      const label = transcriptLabel(entry);
-      let color:
-        ReturnType<typeof transcriptColor> | ReturnType<typeof thinkingColor> =
-        transcriptColor(entry);
-      if (entry.role === "thinking" && agent.thinkingLevel) {
-        color = thinkingColor(agent.thinkingLevel);
-      }
-      rows.push(
-        ` ${theme.fg(color, SQUARE)} ${theme.bold(theme.fg(color, label))}`,
-      );
-      const contentWidth = Math.max(8, width - 4);
-      const bodyColor =
-        entry.role === "thinking" ? color : entry.isError ? "error" : "text";
-      const styled =
-        entry.role === "thinking"
-          ? theme.italic(theme.fg(bodyColor, entry.text))
-          : theme.fg(bodyColor, entry.text);
-      for (const line of wrapTextWithAnsi(styled, contentWidth)) {
-        rows.push(`   ${line}`);
-      }
-      rows.push("");
-    }
-    return rows;
-  }
-
-  /** Chat-style tool block: pending/success/error background + bold name. */
-  private transcriptToolBlock(entry: TranscriptEntry, width: number): string[] {
-    const theme = this.theme;
-    const name = entry.name ?? "tool";
-    const pending = entry.role === "tool";
-    const bgColor = pending
-      ? "toolPendingBg"
-      : entry.isError
-        ? "toolErrorBg"
-        : "toolSuccessBg";
-    const bg = (text: string) => theme.bg(bgColor, text);
-    const title =
-      theme.bold(theme.fg("toolTitle", name)) +
-      (entry.durationMs !== undefined
-        ? theme.fg("dim", ` · ${(entry.durationMs / 1000).toFixed(1)}s`)
-        : "");
-    const inner = Math.max(12, width - 4);
-    const rows: string[] = [bg(` ${title} `)];
-    const body = singleLineBounded(entry.text, 160);
-    if (body) {
-      const bodyColor = pending ? "dim" : entry.isError ? "error" : "success";
-      const bodyStyled = theme.fg(bodyColor, body);
-      for (const line of wrapTextWithAnsi(bodyStyled, inner - 2)) {
-        rows.push(bg(` ${line} `));
-      }
-    }
-    return rows;
+    return buildTranscriptLines(agent.transcript, width, this.theme, {
+      thinkingColor: agent.thinkingLevel
+        ? thinkingColor(agent.thinkingLevel)
+        : undefined,
+    });
   }
 
   private renderTranscript(
@@ -1132,36 +1100,6 @@ export class WorkflowDashboard {
   }
 }
 
-/** Collapse whitespace and bound a line for dense tool blocks. */
-function singleLineBounded(text: string, maxLength = 160): string {
-  const value = text
-    .replace(/[\r\n]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return value.length <= maxLength
-    ? value
-    : `${value.slice(0, maxLength - 1)}\u2026`;
-}
-
-function transcriptLabel(entry: TranscriptEntry): string {
-  if (entry.role === "user") return "USER";
-  if (entry.role === "assistant") return "ASSISTANT";
-  if (entry.role === "thinking") return "THINKING";
-  if (entry.role === "tool") return `TOOL ${entry.name ?? "unknown"}`;
-  return `RESULT ${entry.name ?? "unknown"}`;
-}
-
-function transcriptColor(
-  entry: TranscriptEntry,
-): "accent" | "success" | "dim" | "warning" | "error" | "muted" {
-  if (entry.isError) return "error";
-  if (entry.role === "user") return "accent";
-  if (entry.role === "assistant") return "success";
-  if (entry.role === "thinking") return "dim";
-  if (entry.role === "tool") return "warning";
-  return "muted";
-}
-
 function statusSquareFor(details: WorkflowDetails, theme: Theme): string {
   return theme.fg(statusColor(details.status), SQUARE);
 }
@@ -1197,9 +1135,11 @@ export async function showWorkflowDashboard(
   ctx: ExtensionContext,
   getActive: () => Map<string, WorkflowDetails>,
   initialRunId?: string,
+  isSessionActive: () => boolean = () => true,
 ): Promise<void> {
   await ctx.ui.custom<void>(
     (tui, theme, keybindings, done) => {
+      let paneOpen = false;
       const dashboard: WorkflowDashboard = new WorkflowDashboard(
         tui,
         theme,
@@ -1212,6 +1152,21 @@ export async function showWorkflowDashboard(
           done(undefined);
         },
         initialRunId,
+        (selection, details) => {
+          if (paneOpen) return;
+          paneOpen = true;
+          void showWorkflowAgentPane(
+            ctx,
+            getActive,
+            selection,
+            details,
+            isSessionActive,
+          ).finally(() => {
+            paneOpen = false;
+            tui.requestRender();
+          });
+        },
+        isSessionActive,
       );
       return dashboard;
     },

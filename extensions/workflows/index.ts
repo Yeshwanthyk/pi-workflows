@@ -580,7 +580,12 @@ export default function workflows(pi: ExtensionAPI) {
       const arg = rawArgs.trim();
       if (ctx.mode === "tui") {
         lastUi = ctx.ui;
-        await showWorkflowDashboard(ctx, activeDetails, arg || undefined);
+        await showWorkflowDashboard(
+          ctx,
+          activeDetails,
+          arg || undefined,
+          () => uiSessionId === ctx.sessionManager.getSessionId(),
+        );
         // Opening the dashboard acknowledges finished runs.
         completedRuns = 0;
         failedRuns = 0;
