@@ -560,7 +560,6 @@ export default function workflows(pi: ExtensionAPI) {
     updateIndicator();
   };
 
-
   pi.registerCommand("workflow-draft", {
     description: "Review a pending workflow draft and its exact source",
     getArgumentCompletions: (prefix) => {
@@ -575,13 +574,6 @@ export default function workflows(pi: ExtensionAPI) {
       return matches.length > 0 ? matches : null;
     },
     handler: async (rawArgs, ctx) => {
-      if (ctx.mode !== "tui") {
-        ctx.ui.notify(
-          "Workflow draft review requires interactive mode.",
-          "warning",
-        );
-        return;
-      }
       const query = rawArgs.trim();
       const available = [...pendingDrafts.values()]
         .filter(
@@ -594,7 +586,9 @@ export default function workflows(pi: ExtensionAPI) {
         ? available.filter(
             (draft) => draft.draftId === query || draft.draftId.endsWith(query),
           )
-        : available.slice(0, 1);
+        : ctx.mode === "tui"
+          ? available.slice(0, 1)
+          : available;
       if (matches.length === 0) {
         ctx.ui.notify(
           query
@@ -604,11 +598,27 @@ export default function workflows(pi: ExtensionAPI) {
         );
         return;
       }
+      let draft = matches[0];
       if (matches.length > 1) {
-        ctx.ui.notify(`Multiple pending drafts match "${query}".`, "warning");
-        return;
+        if (ctx.mode === "tui") {
+          ctx.ui.notify(`Multiple pending drafts match "${query}".`, "warning");
+          return;
+        }
+        if (!ctx.hasUI) {
+          ctx.ui.notify(
+            `Multiple pending workflow drafts; specify one of: ${matches.map((item) => item.draftId).join(", ")}`,
+            "warning",
+          );
+          return;
+        }
+        const options = matches.map(
+          (item) => `${item.draftId} — ${item.preview.split("\n", 1)[0]}`,
+        );
+        const choice = await ctx.ui.select("Workflow drafts", options);
+        if (!choice) return;
+        draft = matches[options.indexOf(choice)];
       }
-      const draft = matches[0]!;
+      if (!draft) return;
       let prepared: ReturnType<typeof prepareWorkflowScript>;
       try {
         prepared = prepareWorkflowScript(draft.script);

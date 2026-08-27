@@ -8,6 +8,8 @@ import type {
 import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import {
   showWorkflowDraftReview,
+  showWorkflowDraftReviewFallback,
+  workflowDraftReviewText,
   WorkflowDraftReview,
 } from "./draft-review.ts";
 import type { WorkflowDraft } from "./drafts.ts";
@@ -103,6 +105,7 @@ test("approval action only prefills a newer explicit user response", async () =>
   let editorText = "";
   let notification = "";
   const ctx = {
+    mode: "tui",
     ui: {
       custom: async (
         factory: (
@@ -134,4 +137,86 @@ test("approval action only prefills a newer explicit user response", async () =>
 
   assert.equal(editorText, "Approve workflow draft draft_123456789abc.");
   assert.match(notification, /Submit it to execute/);
+});
+
+test("RPC draft review uses standard editor and confirmation without custom UI", async () => {
+  const calls: string[] = [];
+  let editorPrefill = "";
+  let editorText = "";
+  const ctx = {
+    mode: "rpc",
+    hasUI: true,
+    ui: {
+      async editor(title: string, prefill?: string) {
+        calls.push(`editor:${title}`);
+        editorPrefill = prefill ?? "";
+        return prefill;
+      },
+      async confirm(title: string, message: string) {
+        calls.push(`confirm:${title}:${message}`);
+        return true;
+      },
+      setEditorText(text: string) {
+        editorText = text;
+      },
+      notify(text: string) {
+        calls.push(`notify:${text}`);
+      },
+    },
+  } as unknown as ExtensionCommandContext;
+
+  await showWorkflowDraftReview(
+    ctx,
+    draft,
+    meta,
+    "/tmp/workflows/drafts/draft_123456789abc/draft.json",
+  );
+
+  assert.match(editorPrefill, /Implement a bounded workflow draft review/);
+  assert.match(editorPrefill, /Exact source/);
+  assert.match(editorPrefill, /phase\('Implement'\)/);
+  assert.equal(editorText, "Approve workflow draft draft_123456789abc.");
+  assert.equal(calls.filter((call) => call.startsWith("editor:")).length, 1);
+  assert.equal(calls.filter((call) => call.startsWith("confirm:")).length, 1);
+  assert.equal(calls.filter((call) => call.startsWith("notify:")).length, 1);
+});
+
+test("RPC draft review does not prefill when the review is cancelled or declined", async () => {
+  let setEditorTextCalls = 0;
+  const ctx = {
+    mode: "rpc",
+    hasUI: true,
+    ui: {
+      async editor() {
+        return undefined;
+      },
+      async confirm() {
+        return false;
+      },
+      setEditorText() {
+        setEditorTextCalls += 1;
+      },
+      notify() {},
+    },
+  } as unknown as ExtensionCommandContext;
+
+  await showWorkflowDraftReviewFallback(ctx, draft, meta, "/tmp/draft.json");
+  assert.equal(setEditorTextCalls, 0);
+
+  const confirmedCtx = {
+    ...ctx,
+    ui: {
+      ...ctx.ui,
+      async editor() {
+        return workflowDraftReviewText(draft, meta, "/tmp/draft.json");
+      },
+    },
+  } as unknown as ExtensionCommandContext;
+  await showWorkflowDraftReviewFallback(
+    confirmedCtx,
+    draft,
+    meta,
+    "/tmp/draft.json",
+  );
+  assert.equal(setEditorTextCalls, 0);
 });

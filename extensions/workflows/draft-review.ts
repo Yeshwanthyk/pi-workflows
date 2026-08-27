@@ -283,6 +283,68 @@ export class WorkflowDraftReview {
   }
 }
 
+/** Text shown by the RPC editor while reviewing an immutable draft. */
+export function workflowDraftReviewText(
+  draft: WorkflowDraft,
+  meta: WorkflowMeta,
+  artifactPath: string,
+): string {
+  const phases =
+    meta.phases.length > 0
+      ? meta.phases.map(
+          (phase, index) =>
+            `${index + 1}. ${phase.title}${phase.detail ? ` — ${phase.detail}` : ""}`,
+        )
+      : ["No declared phases"];
+  return [
+    `Workflow draft ${meta.name ?? draft.draftId}`,
+    `Draft: ${draft.draftId}`,
+    `Artifact: ${artifactPath}`,
+    "",
+    "Preview",
+    draft.preview,
+    "",
+    "Plan",
+    ...phases,
+    "",
+    "Exact source",
+    draft.script,
+    "",
+    "Approval",
+    "Immutable draft; no agents have started.",
+    "Review this source, then approve only by submitting the newer user response Pi pre-fills after confirmation.",
+  ].join("\n");
+}
+
+/** Show one pending draft through RPC-safe dialogs and prefill approval. */
+export async function showWorkflowDraftReviewFallback(
+  ctx: ExtensionCommandContext,
+  draft: WorkflowDraft,
+  meta: WorkflowMeta,
+  artifactPath: string,
+) {
+  const review = workflowDraftReviewText(draft, meta, artifactPath);
+  if (!ctx.hasUI) {
+    ctx.ui.notify(review, "info");
+    return;
+  }
+  const editedReview = await ctx.ui.editor(
+    `Workflow draft review · ${meta.name ?? draft.draftId}`,
+    review,
+  );
+  if (editedReview === undefined) return;
+  const approved = await ctx.ui.confirm(
+    "Approve workflow draft?",
+    `This only prepares a newer user response for ${draft.draftId}; submit the prefilled message to execute the immutable draft.`,
+  );
+  if (!approved) return;
+  ctx.ui.setEditorText(`Approve workflow draft ${draft.draftId}.`);
+  ctx.ui.notify(
+    "Approval loaded in the editor. Submit it to execute the immutable draft.",
+    "info",
+  );
+}
+
 /** Show one pending draft and only prefill approval for explicit user submission. */
 export async function showWorkflowDraftReview(
   ctx: ExtensionCommandContext,
@@ -290,6 +352,10 @@ export async function showWorkflowDraftReview(
   meta: WorkflowMeta,
   artifactPath: string,
 ) {
+  if (ctx.mode !== "tui") {
+    await showWorkflowDraftReviewFallback(ctx, draft, meta, artifactPath);
+    return;
+  }
   const action = await ctx.ui.custom<ReviewAction>(
     (tui, theme, keybindings, done) =>
       new WorkflowDraftReview(

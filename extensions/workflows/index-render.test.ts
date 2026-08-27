@@ -6,7 +6,6 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { Key } from "@earendil-works/pi-tui";
 import workflows, { workflowWidgetNeedsUpdate } from "./index.ts";
 
 initTheme("dark");
@@ -45,10 +44,6 @@ function captureWorkflowTool(): CapturedTool {
 
 type CapturedHandler = (...args: unknown[]) => unknown;
 
-interface CapturedShortcut {
-  description?: string;
-  handler: CapturedHandler;
-}
 
 function captureWorkflowHandlers() {
   const handlers = new Map<string, CapturedHandler>();
@@ -65,20 +60,6 @@ function captureWorkflowHandlers() {
   return handlers;
 }
 
-function captureWorkflowShortcuts() {
-  const shortcuts = new Map<string, CapturedShortcut>();
-  const pi = {
-    on() {},
-    registerCommand() {},
-    registerShortcut(shortcut: string, options: CapturedShortcut) {
-      shortcuts.set(shortcut, options);
-    },
-    registerTool() {},
-  } as unknown as ExtensionAPI;
-
-  workflows(pi);
-  return shortcuts;
-}
 
 const theme = {
   fg: (_color: string, text: string) => text,
@@ -147,49 +128,21 @@ test("workflow widget dedupe seam ignores identical rendered lines", () => {
   );
 });
 
-test("workflow shortcut opens the same guarded and acknowledging dashboard", async () => {
-  const shortcuts = captureWorkflowShortcuts();
-  const shortcut = shortcuts.get(Key.ctrlShift("a"));
-  assert.ok(shortcut);
-  assert.equal(shortcut.description, "Open workflows dashboard");
 
-  const notifications: Array<{ message: string; type: string | undefined }> =
-    [];
-  const nonTuiContext = {
-    mode: "rpc",
-    ui: {
-      notify(message: string, type?: string) {
-        notifications.push({ message, type });
-      },
+test("workflow dashboard shortcut stays free for pi-subagents", () => {
+  // ctrl+shift+a intentionally belongs to pi-subagents; users open the
+  // workflow dashboard with /workflows instead.
+  let shortcutCount = 0;
+  const pi = {
+    on() {},
+    registerCommand() {},
+    registerShortcut() {
+      shortcutCount += 1;
     },
-  };
-  await shortcut.handler(nonTuiContext);
-  assert.deepEqual(notifications, [
-    {
-      message: "Workflow dashboard requires interactive mode.",
-      type: "warning",
-    },
-  ]);
-
-  let customCalls = 0;
-  const statusCalls: Array<string | undefined> = [];
-  const tuiContext = {
-    mode: "tui",
-    hasUI: true,
-    ui: {
-      custom: async () => {
-        customCalls += 1;
-      },
-      setStatus(_key: string, value: string | undefined) {
-        statusCalls.push(value);
-      },
-      theme,
-    },
-    sessionManager: { getSessionId: () => "session-shortcut" },
-  };
-  await shortcut.handler(tuiContext);
-  assert.equal(customCalls, 1);
-  assert.deepEqual(statusCalls, [undefined]);
+    registerTool() {},
+  } as unknown as ExtensionAPI;
+  workflows(pi);
+  assert.equal(shortcutCount, 0);
 });
 
 test("streaming workflow drafts expose preview and save boundary", () => {
