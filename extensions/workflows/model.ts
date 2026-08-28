@@ -160,6 +160,11 @@ export interface AgentRecord {
   transcript: TranscriptEntry[];
 }
 
+export interface WorkflowLogEntry {
+  timestamp: number;
+  message: string;
+}
+
 export interface WorkflowDetails {
   runId: string;
   /** Pi session that launched this run. */
@@ -178,6 +183,8 @@ export interface WorkflowDetails {
   finishedAt?: number;
   phases: { title: string; detail?: string }[];
   currentPhase?: string;
+  /** Bounded script-authored progress notes; logs never count as run activity. */
+  logs?: WorkflowLogEntry[];
   agents: AgentRecord[];
   result?: unknown;
   resultArtifact?: string;

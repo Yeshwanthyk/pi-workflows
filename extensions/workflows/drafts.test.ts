@@ -130,3 +130,40 @@ test("workflow drafts require later human input in the same project session", (t
     /different working directory/,
   );
 });
+
+test("saved workflow drafts bind provenance to the exact source snapshot", (t) => {
+  const root = fixture(t);
+  const script = "return 'saved'";
+  const draft = createWorkflowDraft(root, {
+    sessionId: "session-a",
+    cwd: "/project",
+    preparedAtUserInput: 3,
+    preview: "Run saved workflow",
+    script,
+    provenance: {
+      kind: "saved",
+      name: "audit",
+      path: "/project/.pi/workflows/audit.js",
+      scope: "project-pi",
+      sha256:
+        "eebe059a16c4e4bbb1c89a0e188c7bdbf5a7843be2a964e61befd21864f2cd11",
+    },
+  });
+
+  assert.equal(
+    loadWorkflowDraft(root, draft.draftId).provenance?.name,
+    "audit",
+  );
+  const file = path.join(root, "drafts", draft.draftId, "draft.json");
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      ...draft,
+      provenance: { ...draft.provenance, sha256: "0".repeat(64) },
+    }),
+  );
+  assert.throws(
+    () => loadWorkflowDraft(root, draft.draftId),
+    /invalid saved-workflow provenance/,
+  );
+});

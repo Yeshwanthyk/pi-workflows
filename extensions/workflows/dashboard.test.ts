@@ -7,6 +7,7 @@ import {
   buildReport,
   loadStoredRunDetails,
   normalizeDetails,
+  WorkflowRunCatalog,
 } from "./dashboard.ts";
 
 test("historical dashboard hydration normalizes usage and resolved governance", () => {
@@ -204,4 +205,93 @@ test("report exposes queued/running counts and effective capacity", () => {
   const report = buildReport(details);
   assert.match(report, /1 running, 1 queued/);
   assert.match(report, /concurrency 3, host hard capacity 10/);
+});
+
+function writeCatalogRun(
+  root: string,
+  runId: string,
+  sessionId: string,
+  startedAt: number,
+) {
+  const directory = path.join(root, runId);
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(
+    path.join(directory, "workflow.json"),
+    JSON.stringify({
+      runId,
+      sessionId,
+      status: "completed",
+      startedAt,
+      phases: [],
+      agents: [
+        {
+          index: 1,
+          label: "worker",
+          state: "done",
+          preview: "done",
+          usage: {},
+          transcript: [],
+        },
+      ],
+      transcriptArtifact: "transcripts.json",
+    }),
+  );
+  fs.writeFileSync(
+    path.join(directory, "transcripts.json"),
+    JSON.stringify({ 1: [{ role: "assistant", text: `detail:${runId}` }] }),
+  );
+}
+
+test("workflow catalog scans once, filters from memory, and hydrates sidecars lazily", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-catalog-"));
+  try {
+    writeCatalogRun(root, "wf_a", "session-a", 3);
+    writeCatalogRun(root, "wf_b", "session-b", 2);
+    const catalog = new WorkflowRunCatalog(root);
+    assert.deepEqual(catalog.stats, {
+      scans: 1,
+      compactReads: 2,
+      sidecarHydrations: 0,
+    });
+
+    const entries = catalog.entries(new Map(), "session-a", new Set());
+    assert.deepEqual(
+      entries.map((entry) => entry.runId),
+      ["wf_a"],
+    );
+    assert.equal(entries[0]?.details.agents[0]?.transcript.length, 0);
+
+    // Repeated idle refreshes are pure in-memory projections.
+    catalog.entries(new Map(), "session-a", new Set());
+    catalog.entries(new Map(), "session-a", new Set());
+    assert.equal(catalog.stats.scans, 1);
+    assert.equal(catalog.stats.compactReads, 2);
+    assert.equal(catalog.stats.sidecarHydrations, 0);
+
+    const live = normalizeDetails("wf_live", {
+      sessionId: "session-a",
+      status: "running",
+      startedAt: 4,
+      phases: [],
+      agents: [],
+    })!;
+    catalog.entries(new Map([["wf_live", live]]), "session-a", new Set());
+    live.status = "completed";
+    assert.ok(
+      catalog
+        .entries(new Map(), "session-a", new Set())
+        .some((entry) => entry.runId === "wf_live"),
+    );
+
+    const hydrated = catalog.hydrate(entries[0]!);
+    assert.equal(
+      hydrated.details.agents[0]?.transcript[0]?.text,
+      "detail:wf_a",
+    );
+    assert.equal(catalog.stats.sidecarHydrations, 1);
+    catalog.hydrate(entries[0]!);
+    assert.equal(catalog.stats.sidecarHydrations, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

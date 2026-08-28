@@ -44,7 +44,6 @@ function captureWorkflowTool(): CapturedTool {
 
 type CapturedHandler = (...args: unknown[]) => unknown;
 
-
 function captureWorkflowHandlers() {
   const handlers = new Map<string, CapturedHandler>();
   const pi = {
@@ -59,7 +58,6 @@ function captureWorkflowHandlers() {
   workflows(pi);
   return handlers;
 }
-
 
 const theme = {
   fg: (_color: string, text: string) => text,
@@ -127,7 +125,6 @@ test("workflow widget dedupe seam ignores identical rendered lines", () => {
     true,
   );
 });
-
 
 test("workflow dashboard shortcut stays free for pi-subagents", () => {
   // ctrl+shift+a intentionally belongs to pi-subagents; users open the

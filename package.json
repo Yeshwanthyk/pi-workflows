@@ -12,9 +12,12 @@
   },
   "scripts": {
     "check": "npm run lint && tsc --noEmit",
-    "test": "node --test --experimental-strip-types extensions/workflows/activity-card.test.ts extensions/workflows/agent-pane.test.ts extensions/workflows/artifacts.test.ts extensions/workflows/cancellation.test.ts extensions/workflows/controller.test.ts extensions/workflows/dashboard.test.ts extensions/workflows/draft-review.test.ts extensions/workflows/drafts.test.ts extensions/workflows/flow-view.test.ts extensions/workflows/index-render.test.ts extensions/workflows/limits.test.ts extensions/workflows/meta.test.ts extensions/workflows/model.test.ts extensions/workflows/prompt.test.ts extensions/workflows/runner.test.ts extensions/workflows/sandbox.test.ts extensions/workflows/serialization.test.ts extensions/workflows/transcript.test.ts extensions/shared/child-session.test.ts extensions/shared/context-utilization.test.ts extensions/shared/tool-call-timeout.test.ts",
-    "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"*.{json,md}\"",
-    "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"*.{json,md}\"",
+    "test": "node --test --experimental-strip-types extensions/workflows/activity-card.test.ts extensions/workflows/agent-pane.test.ts extensions/workflows/artifacts.test.ts extensions/workflows/cancellation.test.ts extensions/workflows/controller.test.ts extensions/workflows/dashboard.test.ts extensions/workflows/draft-review.test.ts extensions/workflows/drafts.test.ts extensions/workflows/execution.test.ts extensions/workflows/flow-view.test.ts extensions/workflows/index-render.test.ts extensions/workflows/limits.test.ts extensions/workflows/meta.test.ts extensions/workflows/metrics.test.ts extensions/workflows/model.test.ts extensions/workflows/prompt.test.ts extensions/workflows/runner.test.ts extensions/workflows/sandbox.test.ts extensions/workflows/saved-workflows.test.ts extensions/workflows/serialization.test.ts extensions/workflows/transcript.test.ts extensions/shared/child-session.test.ts extensions/shared/context-utilization.test.ts extensions/shared/tool-call-timeout.test.ts tools/workflow-harness/harness.test.ts",
+    "harness": "node --experimental-strip-types tools/workflow-harness/cli.ts",
+    "harness:smoke": "npm run harness -- run tools/workflow-harness/scenarios/basic-sequential.json",
+    "harness:bench": "npm run harness -- bench tools/workflow-harness/scenarios/basic-sequential.json",
+    "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"tools/workflow-harness/**/*.{ts,json}\" \"*.{json,md}\"",
+    "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"tools/workflow-harness/**/*.{ts,json}\" \"*.{json,md}\"",
     "lint": "oxlint"
   },
   "pi": {

@@ -172,3 +172,66 @@ test("sandbox runtime concurrency fails closed and preserves the 32-call limit",
     /agent request budget/,
   );
 });
+
+test("sandbox exposes bounded workflow log messages", async () => {
+  const logs: string[] = [];
+  const result = await run(
+    `log("ready"); log("x".repeat(10_000)); return typeof log;`,
+    { onLog: (message) => logs.push(message) },
+  );
+
+  assert.equal(result, "function");
+  assert.equal(logs[0], "ready");
+  assert.equal(logs[1]?.length, 4_096);
+});
+
+test("pipeline streams each item through stages and preserves result order", async () => {
+  const calls: string[] = [];
+  const result = await run(
+    `
+      return pipeline(["slow", "fast", "broken"],
+        async (value, original, index) => {
+          const reply = await agent("first:" + value);
+          if (original === "broken") throw new Error("item failed");
+          return reply.output + ":" + index;
+        },
+        async (value, original) => {
+          const reply = await agent("second:" + original + ":" + value);
+          return reply.output;
+        },
+      );
+    `,
+    {
+      concurrency: 3,
+      onAgent: async (prompt) => {
+        calls.push(prompt);
+        if (prompt === "first:slow")
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        return { ok: true, output: `reply:${prompt}` };
+      },
+    },
+  );
+
+  assert.deepEqual(result, [
+    "reply:second:slow:reply:first:slow:0",
+    "reply:second:fast:reply:first:fast:1",
+    null,
+  ]);
+  assert.equal(calls.includes("second:broken:reply:first:broken:2"), false);
+  assert.ok(
+    calls.indexOf("second:fast:reply:first:fast:1") <
+      calls.indexOf("second:slow:reply:first:slow:0"),
+    "fast item should enter stage two before slow item leaves stage one",
+  );
+});
+
+test("pipeline validates stages and shares the global agent-call budget", async () => {
+  await assert.rejects(run(`return pipeline([1]);`), /stage functions/);
+  await assert.rejects(
+    run(
+      `return pipeline(Array.from({ length: 33 }, (_, index) => index), (index) => agent(String(index)));`,
+      { concurrency: 16 },
+    ),
+    /agent request budget/,
+  );
+});

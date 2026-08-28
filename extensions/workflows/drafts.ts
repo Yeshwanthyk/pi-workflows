@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+  workflowSourceSha256,
+  type SavedWorkflowProvenance,
+} from "./saved-workflows.ts";
 
 const DRAFT_ID_PATTERN = /^draft_[a-f0-9]{12}$/;
 
@@ -15,6 +19,7 @@ export interface WorkflowDraft {
   script: string;
   args?: string;
   background: boolean;
+  provenance?: SavedWorkflowProvenance;
 }
 
 export interface CreateWorkflowDraftInput {
@@ -25,6 +30,7 @@ export interface CreateWorkflowDraftInput {
   script: string;
   args?: string;
   background?: boolean;
+  provenance?: SavedWorkflowProvenance;
 }
 
 function draftsDir(workflowsDir: string) {
@@ -75,6 +81,22 @@ function validateDraft(value: unknown, expectedDraftId: string): WorkflowDraft {
   if (typeof draft.background !== "boolean") {
     throw new Error("Workflow draft has an invalid background setting");
   }
+  if (draft.provenance !== undefined) {
+    const provenance = draft.provenance as Record<string, unknown>;
+    if (
+      !provenance ||
+      provenance.kind !== "saved" ||
+      typeof provenance.name !== "string" ||
+      typeof provenance.path !== "string" ||
+      (provenance.scope !== "project-pi" &&
+        provenance.scope !== "project-agents" &&
+        provenance.scope !== "agent") ||
+      typeof provenance.sha256 !== "string" ||
+      provenance.sha256 !== workflowSourceSha256(draft.script as string)
+    ) {
+      throw new Error("Workflow draft has invalid saved-workflow provenance");
+    }
+  }
   return draft as unknown as WorkflowDraft;
 }
 
@@ -106,6 +128,7 @@ export function createWorkflowDraft(
     script: input.script,
     ...(input.args !== undefined ? { args: input.args } : {}),
     background: input.background ?? false,
+    ...(input.provenance ? { provenance: input.provenance } : {}),
   };
   try {
     fs.writeFileSync(

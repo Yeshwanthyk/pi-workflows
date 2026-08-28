@@ -21,7 +21,6 @@
  * transcripts use separate artifacts, and there is no resume.
  */
 
-import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -33,16 +32,11 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { formatActivityStatus } from "../shared/activity-status.ts";
-import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
 import {
   cancelActiveWorkflowRun,
   type ActiveWorkflowRun,
 } from "./cancellation.ts";
-import {
-  reconcileWorkflowStatus,
-  RunController,
-  WorkflowTerminationError,
-} from "./controller.ts";
+import { WorkflowTerminationError } from "./controller.ts";
 import {
   loadStoredRunDetails,
   sessionWorkflowRunIds,
@@ -56,7 +50,7 @@ import {
   type WorkflowDraft,
 } from "./drafts.ts";
 import { showWorkflowDraftReview } from "./draft-review.ts";
-import { CapacityPool, hostCapacity, resolveWorkflowLimits } from "./limits.ts";
+import { CapacityPool, hostCapacity } from "./limits.ts";
 import {
   extractMeta,
   formatWorkflowScriptParseError,
@@ -67,11 +61,9 @@ import {
   agentContext,
   aggregateUsage,
   countStates,
-  emptyUsage,
   formatAgentLifecycle,
   formatElapsed,
   formatUsage,
-  isWorkflowThinkingLevel,
   modelBadge,
   phaseGroups,
   resultJson,
@@ -81,8 +73,6 @@ import {
   thinkingColor,
   thinkingExcerpt,
   SQUARE,
-  WORKFLOW_THINKING_LEVELS,
-  type AgentRecord,
   type WorkflowDetails,
 } from "./model.ts";
 import {
@@ -95,14 +85,13 @@ import {
   WORKFLOW_PROMPT_SNIPPET,
   WORKFLOW_TOOL_DESCRIPTION,
 } from "./prompt.ts";
+import { createWorkflowRun } from "./execution.ts";
+import { safeStringify } from "./serialization.ts";
 import {
-  createWorkflowResources,
-  runAgent,
-  type ThinkingLevel,
-  type WorkflowModel,
-} from "./runner.ts";
-import { runWorkflowSandbox } from "./sandbox.ts";
-import { safeStringify, writeFileAtomic } from "./serialization.ts";
+  listSavedWorkflows,
+  loadSavedWorkflow,
+  savedWorkflowProvenance,
+} from "./saved-workflows.ts";
 import {
   ACTIVE_WORK_CHANNELS,
   workflowActiveWorkItem,
@@ -115,32 +104,12 @@ import {
   WORKFLOW_FLOW_FLASH_TTL_MS,
 } from "./flow-view.ts";
 
-const PREVIEW_LENGTH = 200;
-const EMIT_INTERVAL_MS = 120;
-
 /** Pure seam for deduplicating identical below-editor widget projections. */
 export function workflowWidgetNeedsUpdate(
   previousSignature: string,
   lines: readonly string[],
 ): boolean {
   return previousSignature !== workflowFlowSignature(lines);
-}
-
-/** What `agent()` resolves to inside the script. */
-interface ScriptAgentResult {
-  ok: boolean;
-  output: string;
-  structured?: unknown;
-  error?: string;
-}
-
-interface AgentCallOptions {
-  label?: unknown;
-  phase?: unknown;
-  schema?: unknown;
-  model?: unknown;
-  provider?: unknown;
-  effort?: unknown;
 }
 
 const WorkflowParams = Type.Union([
@@ -157,6 +126,27 @@ const WorkflowParams = Type.Union([
         Type.String({
           description: WORKFLOW_PARAMETER_DESCRIPTIONS.args,
         }),
+      ),
+      background: Type.Optional(
+        Type.Boolean({
+          description: WORKFLOW_PARAMETER_DESCRIPTIONS.background,
+        }),
+      ),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      savedWorkflow: Type.String({
+        description:
+          "Saved workflow name from a project or agent workflow directory",
+      }),
+      preview: Type.String({
+        minLength: 1,
+        description: WORKFLOW_PARAMETER_DESCRIPTIONS.preview,
+      }),
+      args: Type.Optional(
+        Type.String({ description: WORKFLOW_PARAMETER_DESCRIPTIONS.args }),
       ),
       background: Type.Optional(
         Type.Boolean({
@@ -197,6 +187,8 @@ interface WorkflowDraftToolDetails {
   background: boolean;
   phases: WorkflowMeta["phases"];
   limits?: WorkflowMeta["limits"];
+  savedWorkflow?: string;
+  sourceSha256?: string;
 }
 
 function isWorkflowDraftToolDetails(
@@ -220,10 +212,6 @@ function summaryLine(details: WorkflowDetails): string {
   return `workflow ${details.name ?? details.runId}: ${formatAgentLifecycle(details)}${
     details.currentPhase ? ` · ${details.currentPhase}` : ""
   }`;
-}
-
-function writeRunFile(runDir: string, name: string, content: string) {
-  writeFileAtomic(path.join(runDir, name), content);
 }
 
 function compactToolDetails(details: WorkflowDetails): WorkflowDetails {
@@ -684,6 +672,61 @@ export default function workflows(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("workflow-saved", {
+    description: "List validated saved workflow definitions",
+    getArgumentCompletions: (prefix) => {
+      try {
+        const matches = listSavedWorkflows(process.cwd(), getAgentDir())
+          .filter((workflow) => workflow.name.startsWith(prefix))
+          .map((workflow) => ({
+            value: workflow.name,
+            label: workflow.name,
+            description: workflow.meta.description ?? workflow.path,
+          }));
+        return matches.length > 0 ? matches : null;
+      } catch {
+        return null;
+      }
+    },
+    handler: async (rawArgs, ctx) => {
+      let saved;
+      try {
+        saved = listSavedWorkflows(ctx.cwd, getAgentDir());
+      } catch (error) {
+        ctx.ui.notify(
+          `Saved workflow discovery failed: ${errorText(error)}`,
+          "error",
+        );
+        return;
+      }
+      const query = rawArgs.trim();
+      const matches = query
+        ? saved.filter(
+            (workflow) =>
+              workflow.name === query || workflow.name.startsWith(query),
+          )
+        : saved;
+      if (matches.length === 0) {
+        ctx.ui.notify(
+          query
+            ? `No saved workflow matching "${query}".`
+            : "No saved workflows found.",
+          "warning",
+        );
+        return;
+      }
+      ctx.ui.notify(
+        matches
+          .map(
+            (workflow) =>
+              `${workflow.name} [${workflow.scope}]${workflow.meta.description ? ` — ${workflow.meta.description}` : ""}\n  ${workflow.path}`,
+          )
+          .join("\n"),
+        "info",
+      );
+    },
+  });
+
   pi.registerTool({
     name: "workflow_cancel",
     label: "Cancel Workflow",
@@ -718,6 +761,59 @@ export default function workflows(pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const workflowsDir = path.join(getAgentDir(), "workflows");
+      if ("savedWorkflow" in params) {
+        const saved = loadSavedWorkflow(
+          params.savedWorkflow,
+          ctx.cwd,
+          getAgentDir(),
+        );
+        const draft = createWorkflowDraft(workflowsDir, {
+          sessionId: ctx.sessionManager.getSessionId(),
+          cwd: ctx.cwd,
+          preparedAtUserInput: userInputRevision,
+          preview: params.preview,
+          script: saved.source,
+          ...(params.args !== undefined ? { args: params.args } : {}),
+          background: params.background ?? false,
+          provenance: savedWorkflowProvenance(saved),
+        });
+        pendingDrafts.set(draft.draftId, draft);
+        const artifactPath = path.join(
+          workflowsDir,
+          "drafts",
+          draft.draftId,
+          "draft.json",
+        );
+        const draftDetails: WorkflowDraftToolDetails = {
+          kind: "draft",
+          draftId: draft.draftId,
+          ...(saved.meta.name ? { name: saved.meta.name } : {}),
+          preview: draft.preview,
+          script: draft.script,
+          artifactPath,
+          background: draft.background,
+          phases: saved.meta.phases,
+          ...(saved.meta.limits ? { limits: saved.meta.limits } : {}),
+          savedWorkflow: saved.name,
+          sourceSha256: saved.sha256,
+        };
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Prepared saved workflow ${saved.name} (${saved.sha256.slice(0, 12)}).\n` +
+                buildWorkflowDraftMessage({
+                  draftId: draft.draftId,
+                  preview: draft.preview,
+                  meta: saved.meta,
+                  artifactPath,
+                }),
+            },
+          ],
+          details: draftDetails,
+        };
+      }
       if ("script" in params) {
         let prepared: ReturnType<typeof prepareWorkflowScript>;
         try {
@@ -795,401 +891,42 @@ export default function workflows(pi: ExtensionAPI) {
         }
       }
 
-      const meta = prepared.meta;
-      const effectiveLimits = resolveWorkflowLimits(
-        meta.limits,
-        sharedCapacity.capacity,
-      );
-      const runId = `wf_${randomBytes(6).toString("hex")}`;
-      const runDir = path.join(workflowsDir, runId);
       const background = draft.background && ctx.hasUI;
-
-      const details: WorkflowDetails = {
-        runId,
+      const meta = prepared.meta;
+      const workflowRun = createWorkflowRun({
+        workflowsDir,
+        script,
+        source: prepared.source,
+        args,
+        ...(argsText !== undefined ? { argsText } : {}),
+        meta,
         sessionId: ctx.sessionManager.getSessionId(),
-        name: meta.name,
-        description: meta.description,
+        cwd: ctx.cwd,
         background,
-        status: "running",
-        startedAt: Date.now(),
-        limits: effectiveLimits,
-        budget: {
-          turns: 0,
-          outputTokens: 0,
-          costUsd: 0,
-          outputComplete: true,
-          costComplete: true,
-        },
-        phases: [...meta.phases],
-        agents: [],
-      };
-
-      // Timers start with run creation, before persistence or sandbox startup.
-      // Background runs survive Esc on the parent turn, but all runs are
-      // aborted and settled during session shutdown.
-      const controller = new RunController({
         parentSignal: background ? undefined : signal,
-        limits: effectiveLimits,
         sharedCapacity,
-      });
-      const syncGovernance = () => {
-        details.budget = controller.telemetry();
-        details.termination = controller.terminationRecord;
-      };
-
-      writeRunFile(runDir, "script.js", script);
-      if (argsText !== undefined) writeRunFile(runDir, "args.json", argsText);
-      // No sidecars yet: an early crash leaves a compact workflow.json only.
-      persistWorkflowJson(runDir, details, { artifacts: false });
-      // Live checkpoints only need the compact workflow.json; the large
-      // transcripts/result sidecars are written once at the final flush.
-      const persistence = createWorkflowPersistence(runDir, details, {
-        persist: (dir, current) =>
-          persistWorkflowJson(dir, current, { artifacts: false }),
-        finalPersist: (dir, current) =>
-          persistWorkflowJson(dir, current, { artifacts: true }),
-      });
-
-      // Each concurrent child gets its own extension runtime. All children use
-      // the parent cwd and live trust decision.
-      const projectTrusted = ctx.isProjectTrusted();
-      const getResources = (structured: boolean) =>
-        createWorkflowResources(
-          ctx.cwd,
-          structured ? "structured" : "plain",
-          projectTrusted,
-        );
-
-      // Throttled progress: tool-block updates when blocking. Background
-      // runs are covered by the below-editor indicator and /workflows.
-      let emitTimer: ReturnType<typeof setTimeout> | undefined;
-      let lastEmit = 0;
-      const flush = () => {
-        emitTimer = undefined;
-        lastEmit = Date.now();
-        publishWorkflowActivity(details);
-        if (background) return;
-        onUpdate?.({
-          content: [{ type: "text", text: summaryLine(details) }],
-          details: compactToolDetails(details),
-        });
-      };
-      const emit = (checkpoint = true) => {
-        syncGovernance();
-        if (checkpoint) persistence.checkpoint();
-        if (emitTimer) return;
-        emitTimer = setTimeout(
-          flush,
-          Math.max(0, EMIT_INTERVAL_MS - (Date.now() - lastEmit)),
-        );
-      };
-      const flushNow = () => {
-        if (emitTimer) clearTimeout(emitTimer);
-        flush();
-      };
-
-      const phaseFn = (title: unknown) => {
-        controller.activity();
-        const text = String(title);
-        details.currentPhase = text;
-        if (!details.phases.some((p) => p.title === text))
-          details.phases.push({ title: text });
-        emit();
-      };
-
-      let agentCounter = 0;
-      const agentFn = async (
-        promptValue: unknown,
-        optsValue: unknown = {},
-        invocationSignal?: AbortSignal,
-      ): Promise<ScriptAgentResult> => {
-        const index = ++agentCounter;
-        const opts: AgentCallOptions =
-          optsValue && typeof optsValue === "object"
-            ? (optsValue as AgentCallOptions)
-            : {};
-        const label =
-          typeof opts.label === "string" && opts.label.trim()
-            ? opts.label.trim().slice(0, 160)
-            : `agent-${index}`;
-
-        const queuedAt = Date.now();
-        const record: AgentRecord = {
-          index,
-          label,
-          phase:
-            typeof opts.phase === "string"
-              ? opts.phase.slice(0, 160)
-              : details.currentPhase,
-          state: "queued",
-          model: ctx.model?.id,
-          provider: ctx.model?.provider,
-          modelName: ctx.model?.name,
-          contextWindow: ctx.model?.contextWindow,
-          queuedAt,
-          lastActivityAt: queuedAt,
-          currentTools: [],
-          completedOperations: 0,
-          preview: "",
-          usage: emptyUsage(),
-          transcript: [],
-        };
-        details.agents.push(record);
-        persistence.checkpoint({ immediate: true });
-        emit(false);
-
-        const fail = (error: string): ScriptAgentResult => {
-          controller.taskUpdate(() => {
-            record.state = "error";
-            record.error = error;
-            record.finishedAt ??= Date.now();
-            record.lastActivityAt = record.finishedAt;
-            record.currentTools = [];
-            emit();
+        model: ctx.model,
+        modelRegistry: ctx.modelRegistry,
+        projectTrusted: ctx.isProjectTrusted(),
+        getThinkingLevel: () => pi.getThinkingLevel(),
+        onProgress: (details) => {
+          publishWorkflowActivity(details);
+          if (background) return;
+          onUpdate?.({
+            content: [{ type: "text", text: summaryLine(details) }],
+            details: compactToolDetails(details),
           });
-          return { ok: false, output: "", error };
-        };
-
-        const prompt =
-          typeof promptValue === "string"
-            ? promptValue
-            : String(promptValue ?? "");
-        if (!prompt.trim())
-          return fail("agent() requires a non-empty prompt string");
-        if (controller.signal.aborted)
-          return fail("Workflow was aborted before this agent started");
-
-        return controller
-          .schedule(
-            async (runSignal, runtime) => {
-              // Model/provider resolution: default to the parent session's model.
-              let model: WorkflowModel | undefined = ctx.model;
-              if (opts.model !== undefined || opts.provider !== undefined) {
-                const modelOpt =
-                  typeof opts.model === "string" ? opts.model : undefined;
-                const providerOpt =
-                  typeof opts.provider === "string" ? opts.provider : undefined;
-                if (!modelOpt)
-                  return fail(
-                    `agent "${label}": \`provider\` requires \`model\` as well`,
-                  );
-                let resolved: WorkflowModel | undefined;
-                if (providerOpt) {
-                  resolved = ctx.modelRegistry.find(providerOpt, modelOpt);
-                } else {
-                  const slash = modelOpt.indexOf("/");
-                  if (slash > 0) {
-                    resolved = ctx.modelRegistry.find(
-                      modelOpt.slice(0, slash),
-                      modelOpt.slice(slash + 1),
-                    );
-                  }
-                  resolved ??= ctx.modelRegistry
-                    .getAll()
-                    .find((m) => m.id === modelOpt);
-                }
-                if (!resolved) {
-                  const requested = providerOpt
-                    ? `${providerOpt}/${modelOpt}`
-                    : modelOpt;
-                  return fail(
-                    `agent "${label}": unknown model "${requested}" (use provider/id)`,
-                  );
-                }
-                model = resolved;
-              }
-              // Effort → thinking level; default inherits the parent session.
-              let thinkingLevel: ThinkingLevel = pi.getThinkingLevel();
-              if (opts.effort !== undefined) {
-                const effort = String(opts.effort);
-                if (!isWorkflowThinkingLevel(effort)) {
-                  return fail(
-                    `agent "${label}": invalid effort "${effort}" (use ${WORKFLOW_THINKING_LEVELS.join("|")})`,
-                  );
-                }
-                thinkingLevel = effort;
-              }
-              controller.taskUpdate(() => {
-                record.model = model?.id;
-                record.provider = model?.provider;
-                record.modelName = model?.name;
-                record.thinkingLevel = thinkingLevel;
-                record.contextWindow = model?.contextWindow;
-                emit();
-              });
-
-              runtime.activity();
-              const resources = await getResources(opts.schema !== undefined);
-              runtime.activity();
-              const outcome = await runAgent({
-                prompt,
-                schema: opts.schema,
-                model,
-                thinkingLevel,
-                cwd: ctx.cwd,
-                loader: resources.loader,
-                settingsManager: resources.settingsManager,
-                modelRegistry: ctx.modelRegistry,
-                signal: runSignal,
-                onActivity: () => {
-                  runtime.activity();
-                  controller.taskUpdate(() => {
-                    record.lastActivityAt = Date.now();
-                    emit(false);
-                  });
-                },
-                onTurnStart: runtime.reserveTurn,
-                onUsage: runtime.reportUsage,
-                onProgress: (progress) => {
-                  controller.taskUpdate(() => {
-                    record.preview = progress.preview.slice(0, PREVIEW_LENGTH);
-                    record.usage = { ...progress.usage };
-                    record.model = progress.model ?? record.model;
-                    record.provider = progress.provider ?? record.provider;
-                    record.modelName = progress.modelName ?? record.modelName;
-                    record.thinkingPreview = (
-                      progress.thinking ??
-                      record.thinkingPreview ??
-                      ""
-                    ).slice(0, PREVIEW_LENGTH);
-                    record.contextWindow =
-                      progress.contextWindow ?? record.contextWindow;
-                    record.transcript = progress.transcript;
-                    record.lastActivityAt = progress.lastActivityAt;
-                    record.currentTools = progress.currentTools;
-                    record.completedOperations = progress.completedOperations;
-                    emit();
-                  });
-                },
-              });
-
-              controller.taskUpdate(() => {
-                record.usage = { ...outcome.usage };
-                record.model = outcome.model ?? record.model;
-                record.provider = outcome.provider ?? record.provider;
-                record.modelName = outcome.modelName ?? record.modelName;
-                record.contextWindow =
-                  outcome.contextWindow ?? record.contextWindow;
-                record.transcript = outcome.transcript;
-                record.preview = (outcome.output || record.preview).slice(
-                  0,
-                  PREVIEW_LENGTH,
-                );
-                record.finishedAt ??= Date.now();
-                record.lastActivityAt = record.finishedAt;
-                record.currentTools = [];
-                record.state = outcome.ok ? "done" : "error";
-                if (outcome.ok) {
-                  delete record.error;
-                } else {
-                  // An agent aborted by the run (e.g. a sibling tripped a
-                  // budget) gets the authoritative termination cause rather
-                  // than a generic child-teardown abort message.
-                  record.error =
-                    outcome.aborted && controller.termination
-                      ? controller.termination.message
-                      : (outcome.error ?? "Agent failed");
-                }
-                emit();
-              });
-
-              return {
-                ok: outcome.ok,
-                output: outcome.output,
-                ...(outcome.structured !== undefined
-                  ? { structured: outcome.structured }
-                  : {}),
-                ...(outcome.error !== undefined
-                  ? { error: outcome.error }
-                  : {}),
-              };
-            },
-            {
-              invocationSignal,
-              usageKey: index,
-              onStarted: () => {
-                controller.taskUpdate(() => {
-                  record.state = "running";
-                  record.startedAt = Date.now();
-                  record.lastActivityAt = record.startedAt;
-                  emit();
-                });
-              },
-              onFinished: () => {
-                controller.taskUpdate(() => {
-                  record.finishedAt ??= Date.now();
-                  record.lastActivityAt = record.finishedAt;
-                  record.currentTools = [];
-                });
-              },
-            },
-          )
-          .catch((error) => fail(errorText(error)));
-      };
-
-      const runScript = async () => {
-        let sandboxSucceeded = false;
-        try {
-          details.result = await runWorkflowSandbox({
-            source: prepared.source,
-            args,
-            cwd: ctx.cwd,
-            signal: controller.signal,
-            concurrency: effectiveLimits.concurrency,
-            onAgent: agentFn,
-            onPhase: phaseFn,
-          });
-          sandboxSucceeded = true;
-        } catch (error) {
-          if (!controller.termination) controller.failScript(errorText(error));
-          details.error = controller.termination?.message ?? errorText(error);
-        }
-
-        // A typed controller reason always wins, including one racing apparent
-        // sandbox success before this continuation executes.
-        const settled = await controller.settle({
-          abort: !sandboxSucceeded || controller.termination !== undefined,
-        });
-        const status = reconcileWorkflowStatus({
-          sandboxSucceeded,
-          termination: controller.termination,
-          settled,
-        });
-        syncGovernance();
-        if (controller.termination) {
-          details.error = controller.termination.message;
-        } else if (!settled) {
-          details.error = "Agent shutdown deadline exceeded";
-        }
-        for (const record of details.agents) {
-          if (record.state !== "running" && record.state !== "queued") continue;
-          record.state = "error";
-          record.error =
-            record.error ?? "Agent did not settle before run cleanup";
-          record.finishedAt ??= Date.now();
-          record.lastActivityAt = record.finishedAt;
-          record.currentTools = [];
-        }
-        details.status = status;
-        details.finishedAt = Date.now();
-        syncGovernance();
-        try {
-          persistence.flush();
-        } catch (error) {
-          details.status = "failed";
-          details.error = `Artifact persistence failed: ${errorText(error)}`;
-          throw new Error(details.error);
-        } finally {
-          flushNow();
-        }
-      };
+        },
+      });
+      const { details, controller, runDir } = workflowRun;
+      const { runId } = details;
 
       // Registered for /workflows visibility and session_shutdown abort;
       // blocking runs are watchable live from the dashboard too.
       const activeRun: ActiveWorkflowRun = { details, controller };
       activeRuns.set(runId, activeRun);
       publishWorkflowActivity(details);
-      const completion = runScript();
+      const completion = workflowRun.handle();
       activeRun.completion = completion;
       if (ctx.hasUI) lastUi = ctx.ui;
       updateIndicator();
@@ -1269,13 +1006,18 @@ export default function workflows(pi: ExtensionAPI) {
         return component;
       }
       const script = "script" in args ? args.script : undefined;
+      const savedName =
+        "savedWorkflow" in args && typeof args.savedWorkflow === "string"
+          ? args.savedWorkflow
+          : undefined;
       const meta =
         typeof script === "string" ? extractMeta(script) : { phases: [] };
       let text =
         theme.fg("toolTitle", theme.bold("workflow draft ")) +
         theme.fg(
           "accent",
-          (meta as WorkflowMeta).name ??
+          savedName ??
+            (meta as WorkflowMeta).name ??
             (context.argsComplete ? "(script)" : "preparing…"),
         );
       if ("background" in args && args.background) {
@@ -1340,7 +1082,7 @@ export default function workflows(pi: ExtensionAPI) {
           new Text(
             theme.fg(
               "dim",
-              `Draft: ${details.draftId}\nArtifact: ${details.artifactPath}\nNo agents started. Approve only after review.`,
+              `Draft: ${details.draftId}\nArtifact: ${details.artifactPath}${details.savedWorkflow ? `\nSaved workflow: ${details.savedWorkflow}\nSource SHA-256: ${details.sourceSha256}` : ""}\nNo agents started. Approve only after review.`,
             ),
             0,
             0,
@@ -1502,6 +1244,22 @@ export default function workflows(pi: ExtensionAPI) {
               ),
             );
           }
+        }
+      }
+
+      if (details.logs?.length) {
+        container.addChild(new Spacer(1));
+        container.addChild(
+          new Text(theme.fg("muted", "─── workflow log ───"), 0, 0),
+        );
+        for (const entry of details.logs.slice(-8)) {
+          container.addChild(
+            new Text(
+              theme.fg("dim", `• ${entry.message.replace(/[\r\n]+/g, " ")}`),
+              0,
+              0,
+            ),
+          );
         }
       }
 

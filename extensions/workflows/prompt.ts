@@ -12,7 +12,7 @@ export const WORKFLOW_PARAMETER_DESCRIPTIONS = {
   preview:
     "Free-form workflow preview for the user. Explain the outcome, ordered phases, scoped parallel lanes, dependencies, model/effort choices, shared limits, expected duration, and intentionally excluded work.",
   script:
-    "JavaScript workflow script to save as a draft. May start with `export const meta = {...}`, then use phase(), agent(), parallel(), args, and a final `return`. Raw scripts never execute on submission.",
+    "JavaScript workflow script to save as a draft. May start with `export const meta = {...}`, then use phase(), log(), agent(), parallel(), pipeline(), args, and a final `return`. Raw scripts never execute on submission.",
   args: "Optional JSON string saved with the draft and exposed to the script as `args` (parsed when valid JSON, otherwise passed through as the raw string).",
   background:
     "Save the draft for background execution. When approved and executed, the tool returns a run id immediately and sends a follow-up on completion. Defaults to false.",
@@ -25,12 +25,15 @@ export const WORKFLOW_PARAMETER_DESCRIPTIONS = {
 export const WORKFLOW_TOOL_DESCRIPTION = [
   "The workflow tool is only to be called when the user says 'ultracode' or specifically requests a workflow run.",
   "Prepare and execute a multi-agent workflow in two deterministic steps. First submit a free-form preview with the JavaScript orchestration script; this validates and saves an immutable draft but starts no agents. Only after the user reviews it and sends a newer response may you call the tool again with only the draftId to execute the saved script, args, and background setting.",
+  "A reusable saved definition may be prepared with { savedWorkflow, preview, args?, background? } instead of inline script. Saved definitions are source-snapshotted with SHA-256 provenance and use the identical review and newer-user-response approval boundary; they never execute directly.",
   "Use workflows when a task benefits from several isolated subagents with distinct ownership or phase dependencies. Independent drafts may execute concurrently in background, while the process-global capacity pool bounds aggregate fan-out.",
   "The script runs as an async function body with these primitives:",
   "• export const meta = { name, description, phases: [{ title, detail? }], limits? } — static metadata for the progress UI and optional run limits. Declare all phases up front. `limits` is a closed literal-only object: { concurrency?, workflow?: { wallMs?, idleMs? }, agent?: { wallMs?, idleMs? }, total?: { turns?, outputTokens?, costUsd? } }. Concurrency and durations are positive safe integers; turns/outputTokens are non-negative safe integers; costUsd is non-negative finite. Omitted budgets use protective defaults (400 total turns, 200k output tokens, 30-minute per-agent wall, 2-hour run wall) instead of unbounded.",
   "• phase(title) — mark the current phase at runtime (use titles from meta.phases).",
+  "• log(message) — publish a bounded progress note without extending the workflow idle deadline. Logs are capped per event and per run.",
   "• await agent(prompt, { label?, phase?, schema?, model?, provider?, effort? }) — run ONE subagent in an isolated context and wait for it. Always resolves to { ok, output, structured?, error? }. Check `ok` before using the result. When you pass a JSON `schema`, `structured` holds the validated object on success. `model`/`provider` override the session model; `effort` sets the thinking level (off|minimal|low|medium|high|xhigh|max). Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate, manage task lists, or ask the user.",
   "• await parallel([() => agent(...), () => agent(...)], { concurrency? }) — run zero-argument agent thunks concurrently and return results in order. Omitted concurrency defaults to min(4, the run cap); explicit concurrency may use the resolved run cap. A process-global host pool remains authoritative.",
+  "• await pipeline(items, ...stages) — stream every item through async stage functions without a stage-wide barrier. Stages receive (previous, original, index); results preserve item order. A thrown stage returns null for that item and skips its remaining stages.",
   "• args — the parsed value of the `args` tool parameter (or undefined).",
   "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. A run may make at most 32 agent calls. Requested concurrency is clamped to the host hard capacity (min(16, max(1, availableParallelism - 2))); omission uses min(4, hard capacity). Optional metadata budgets bound workflow/agent wall and idle time plus total turns, output tokens, and cost. Configured output/cost budgets fail closed when finalized provider usage is missing or non-finite; finite zero is known usage. Each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly. Each individual child tool call times out independently after 3 minutes, becomes an error tool result, and leaves the agent loop free to recover. Use map/filter/if/await to orchestrate, prefer quoted strings for static prompts, reserve template literals for interpolation, and `return` a JSON-serializable aggregate.",
   "Pass a `schema` to agent() whenever a later step branches on the result, so you get typed fields instead of prose. There is no resume: a failed run is simply re-run. Artifacts are saved under ~/.pi/agent/workflows/<runId>/ for inspection.",
@@ -48,7 +51,7 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
 
 /** Adds workflow orchestration primitives and background execution to the model's tool prompt. */
 export const WORKFLOW_PROMPT_SNIPPET =
-  "Prepare an inspectable workflow draft, then execute it after user approval; orchestrate scoped isolated subagents with phase()/agent()/parallel() and optional background execution";
+  "Prepare an inspectable workflow draft, then execute it after user approval; orchestrate scoped isolated subagents with phase()/log()/agent()/parallel()/pipeline() and optional background execution";
 
 /** Guides the model toward proportional, non-overlapping workflow ownership. */
 export const WORKFLOW_PROMPT_GUIDELINES = [

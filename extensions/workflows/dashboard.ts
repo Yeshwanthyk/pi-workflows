@@ -27,7 +27,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { loadWorkflowArtifacts, normalizeTranscript } from "./artifacts.ts";
 import { normalizeEffectiveWorkflowLimits } from "./limits.ts";
-import { buildTranscriptLines } from "./transcript.ts";
+import { buildTranscriptLines, sanitizeText } from "./transcript.ts";
 import { showWorkflowAgentPane, type AgentSelection } from "./agent-pane.ts";
 import {
   agentContext,
@@ -196,6 +196,23 @@ export function normalizeDetails(
     phases,
     currentPhase:
       typeof record.currentPhase === "string" ? record.currentPhase : undefined,
+    logs: Array.isArray(record.logs)
+      ? record.logs.flatMap((item) => {
+          if (!item || typeof item !== "object") return [];
+          const log = item as Record<string, unknown>;
+          return typeof log.message === "string"
+            ? [
+                {
+                  timestamp:
+                    typeof log.timestamp === "number"
+                      ? log.timestamp
+                      : startedAt,
+                  message: sanitizeText(log.message),
+                },
+              ]
+            : [];
+        })
+      : [],
     agents,
     result: record.result,
     resultArtifact:
@@ -228,8 +245,25 @@ export function sessionWorkflowRunIds(ctx: ExtensionContext): Set<string> {
   return runIds;
 }
 
-/** Load and recover one persisted run independently of any UI surface. */
-export function loadStoredRunDetails(
+function recoverStaleRun(
+  details: WorkflowDetails,
+  now: number,
+): WorkflowDetails {
+  if (details.status !== "running") return details;
+  details.status = "aborted";
+  details.finishedAt = details.finishedAt ?? now;
+  details.error = details.error ?? "Recovered stale run that was not active";
+  for (const agent of details.agents) {
+    if (agent.state !== "running" && agent.state !== "queued") continue;
+    agent.state = "error";
+    agent.error = agent.error ?? "Run ended before this agent settled";
+    agent.finishedAt = details.finishedAt;
+  }
+  return details;
+}
+
+/** Load compact persisted metadata without hydrating transcript/result sidecars. */
+export function loadStoredRunSummary(
   runId: string,
   runDir = path.join(runsDir(), runId),
   now = Date.now(),
@@ -240,21 +274,102 @@ export function loadStoredRunDetails(
     );
     const details = normalizeDetails(runId, raw);
     if (!details) return undefined;
-    loadWorkflowArtifacts(runDir, details);
-    if (details.status !== "running") return details;
-
-    details.status = "aborted";
-    details.finishedAt = details.finishedAt ?? now;
-    details.error = details.error ?? "Recovered stale run that was not active";
-    for (const agent of details.agents) {
-      if (agent.state !== "running" && agent.state !== "queued") continue;
-      agent.state = "error";
-      agent.error = agent.error ?? "Run ended before this agent settled";
-      agent.finishedAt = details.finishedAt;
-    }
-    return details;
+    return recoverStaleRun(details, now);
   } catch {
     return undefined;
+  }
+}
+
+/** Load and recover one persisted run independently of any UI surface. */
+export function loadStoredRunDetails(
+  runId: string,
+  runDir = path.join(runsDir(), runId),
+  now = Date.now(),
+): WorkflowDetails | undefined {
+  const details = loadStoredRunSummary(runId, runDir, now);
+  if (!details) return undefined;
+  loadWorkflowArtifacts(runDir, details);
+  return details;
+}
+
+export interface WorkflowRunCatalogStats {
+  scans: number;
+  compactReads: number;
+  sidecarHydrations: number;
+}
+
+/** Session-filtered historical cache: disk is touched only at construction and detail open. */
+export class WorkflowRunCatalog {
+  private readonly historical = new Map<string, WorkflowDetails>();
+  private readonly observed = new Map<string, WorkflowDetails>();
+  private readonly hydrated = new Map<string, WorkflowDetails>();
+  private readonly root: string;
+  readonly stats: WorkflowRunCatalogStats = {
+    scans: 0,
+    compactReads: 0,
+    sidecarHydrations: 0,
+  };
+
+  constructor(root = runsDir()) {
+    this.root = root;
+    this.scan();
+  }
+
+  private scan(): void {
+    this.stats.scans += 1;
+    let names: string[] = [];
+    try {
+      names = fs
+        .readdirSync(this.root)
+        .filter((name) => name.startsWith("wf_"));
+    } catch {
+      return;
+    }
+    for (const runId of names) {
+      this.stats.compactReads += 1;
+      const details = loadStoredRunSummary(runId, path.join(this.root, runId));
+      if (details) this.historical.set(runId, details);
+    }
+  }
+
+  entries(
+    active: Map<string, WorkflowDetails>,
+    sessionId: string,
+    referencedRunIds: ReadonlySet<string>,
+  ): RunEntry[] {
+    const entries: RunEntry[] = [];
+    const seen = new Set<string>();
+    for (const [runId, details] of active) {
+      entries.push({ runId, details, live: true });
+      this.observed.set(runId, details);
+      seen.add(runId);
+    }
+    const settled = new Map([...this.historical, ...this.observed]);
+    for (const [runId, summary] of settled) {
+      if (seen.has(runId)) continue;
+      if (summary.sessionId !== sessionId && !referencedRunIds.has(runId))
+        continue;
+      entries.push({
+        runId,
+        details: this.hydrated.get(runId) ?? summary,
+        live: false,
+      });
+    }
+    return entries.sort((a, b) => b.details.startedAt - a.details.startedAt);
+  }
+
+  hydrate(entry: RunEntry): RunEntry {
+    if (entry.live) return entry;
+    const cached = this.hydrated.get(entry.runId);
+    if (cached) return { ...entry, details: cached };
+    this.stats.sidecarHydrations += 1;
+    const details = loadStoredRunDetails(
+      entry.runId,
+      path.join(this.root, entry.runId),
+    );
+    if (!details) return entry;
+    this.hydrated.set(entry.runId, details);
+    return { ...entry, details };
   }
 }
 
@@ -311,6 +426,14 @@ export function buildReport(details: WorkflowDetails): string {
   }
   if (details.description) lines.push("", details.description);
   if (details.error) lines.push("", `**Error:** ${details.error}`);
+  if (details.logs?.length) {
+    lines.push("", "## Workflow log", "");
+    for (const entry of details.logs) {
+      lines.push(
+        `- ${new Date(entry.timestamp).toISOString()} — ${entry.message}`,
+      );
+    }
+  }
 
   for (const group of phaseGroups(details, true)) {
     lines.push("", `## ${group.title}`, "");
@@ -384,6 +507,7 @@ export class WorkflowDashboard {
     details: WorkflowDetails,
   ) => void;
   private isSessionActive: () => boolean;
+  private readonly catalog: WorkflowRunCatalog;
 
   constructor(
     tui: TUI,
@@ -399,6 +523,7 @@ export class WorkflowDashboard {
       details: WorkflowDetails,
     ) => void,
     isSessionActive: () => boolean = () => true,
+    catalog?: WorkflowRunCatalog,
   ) {
     this.tui = tui;
     this.theme = theme;
@@ -409,13 +534,14 @@ export class WorkflowDashboard {
     this.close = close;
     this.openAgentPane = openAgentPane;
     this.isSessionActive = isSessionActive;
+    this.catalog = catalog ?? new WorkflowRunCatalog();
     this.refresh();
     if (initialRunId) {
       const entry = this.entries.find(
         (e) => e.runId === initialRunId || e.runId.endsWith(initialRunId),
       );
       if (entry) {
-        this.current = entry;
+        this.current = this.catalog.hydrate(entry);
         this.listIndex = this.entries.indexOf(entry);
         this.view = "detail";
       }
@@ -447,7 +573,7 @@ export class WorkflowDashboard {
 
   private refresh() {
     const selected = this.entries[this.listIndex]?.runId;
-    this.entries = loadRunEntries(
+    this.entries = this.catalog.entries(
       this.getActive(),
       this.sessionId,
       this.referencedRunIds,
@@ -464,7 +590,11 @@ export class WorkflowDashboard {
       const refreshed = this.entries.find(
         (e) => e.runId === this.current?.runId,
       );
-      if (refreshed) this.current = refreshed;
+      if (refreshed) {
+        this.current = this.current.live
+          ? refreshed
+          : this.catalog.hydrate(refreshed);
+      }
     }
     if (this.notice && Date.now() - this.noticeAt > NOTICE_TTL_MS)
       this.notice = undefined;
@@ -565,7 +695,7 @@ export class WorkflowDashboard {
       } else if (confirm) {
         const entry = this.entries[this.listIndex];
         if (entry) {
-          this.current = entry;
+          this.current = this.catalog.hydrate(entry);
           this.phaseIndex = 0;
           this.agentIndex = 0;
           this.detailFocus = "phases";
@@ -851,7 +981,14 @@ export class WorkflowDashboard {
       " " +
       theme.fg(
         "muted",
-        [dominantModel(d), d.description ?? d.runId, capacity]
+        [
+          dominantModel(d),
+          d.description ?? d.runId,
+          capacity,
+          d.logs?.length
+            ? `log: ${d.logs.at(-1)?.message.replace(/[\r\n]+/g, " ")}`
+            : undefined,
+        ]
           .filter(Boolean)
           .join(" · "),
       );

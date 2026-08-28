@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "pipeline-log",
+  "workflow": {
+    "script": "export const meta = { name: 'pipeline-log', phases: [{ title: 'Process' }] }\nphase('Process')\nlog('starting pipeline')\nconst results = await pipeline(args.items, async (item, original, index) => {\n  const result = await agent('process:' + item, { label: 'item-' + index })\n  if (!result.ok) throw new Error(result.error || 'failed')\n  return result.output\n}, async (output, original) => original === 'skip' ? Promise.reject(new Error('skip')) : output.toUpperCase())\nlog('pipeline settled')\nreturn results",
+    "args": "{\"items\":[\"alpha\",\"skip\",\"omega\"]}"
+  },
+  "runtime": {
+    "hostCapacity": 4,
+    "thinkingLevel": "low"
+  },
+  "synthetic": {
+    "delayMs": 2,
+    "output": "synthetic-ok",
+    "usage": {
+      "input": 10,
+      "output": 4,
+      "cost": 0,
+      "turns": 1
+    }
+  },
+  "expected": {
+    "status": "completed",
+    "agentCount": 3
+  },
+  "benchmark": {
+    "warmup": 1,
+    "iterations": 5
+  }
+}

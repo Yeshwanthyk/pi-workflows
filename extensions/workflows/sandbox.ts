@@ -9,6 +9,9 @@ const MAX_ARGS_BYTES = 256 * 1024;
 const MAX_RESULT_BYTES = 1024 * 1024;
 const MAX_AGENT_MESSAGE_BYTES = 512 * 1024;
 const MAX_AGENT_REQUESTS = 32;
+export const MAX_WORKFLOW_LOG_BYTES = 4 * 1024;
+export const MAX_WORKFLOW_LOG_ENTRIES = 128;
+export const MAX_WORKFLOW_LOG_TOTAL_BYTES = 64 * 1024;
 
 export interface SandboxAgentOptions {
   label?: unknown;
@@ -39,6 +42,7 @@ export interface RunWorkflowSandboxOptions {
     signal: AbortSignal,
   ) => Promise<SandboxAgentResult>;
   onPhase: (title: string) => void;
+  onLog?: (message: string) => void;
 }
 
 function byteLength(value: string) {
@@ -213,6 +217,26 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
         }
         return;
       }
+      if (raw.kind === "log") {
+        if (
+          typeof raw.payloadJson !== "string" ||
+          byteLength(raw.payloadJson) > MAX_WORKFLOW_LOG_BYTES * 4 + 256
+        ) {
+          finish(new Error("Workflow sandbox sent an oversized log update"));
+          return;
+        }
+        try {
+          const payload: unknown = JSON.parse(raw.payloadJson);
+          if (!isRecord(payload) || typeof payload.message !== "string") {
+            throw new Error("invalid message");
+          }
+          options.onLog?.(payload.message);
+        } catch {
+          finish(new Error("Workflow sandbox sent an invalid log update"));
+        }
+        return;
+      }
+
       if (raw.kind === "agent") {
         if (
           typeof raw.payloadJson !== "string" ||

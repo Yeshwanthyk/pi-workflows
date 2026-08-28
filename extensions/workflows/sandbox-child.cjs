@@ -95,7 +95,7 @@ const BOOTSTRAP = String.raw`
       while (true) {
         const index = next++;
         if (index >= items.length) return;
-        results[index] = await invoke(items[index]);
+        results[index] = await invoke(items[index], index);
       }
     });
     await Promise.all(workers);
@@ -119,8 +119,27 @@ const BOOTSTRAP = String.raw`
     });
   }
 
+  async function pipeline(items, ...stages) {
+    if (!Array.isArray(items)) throw new Error("pipeline() expects an array of items");
+    if (stages.length === 0 || stages.some((stage) => typeof stage !== "function")) {
+      throw new Error("pipeline() expects one or more stage functions");
+    }
+    return mapLimited(items, runtimeConcurrency, async (original, index) => {
+      let previous = original;
+      try {
+        for (const stage of stages) previous = await stage(previous, original, index);
+        return previous;
+      } catch {
+        return null;
+      }
+    });
+  }
+
   function phase(title) {
     callHost("phase", JSON.stringify({ title: String(title) }));
+  }
+  function log(message) {
+    callHost("log", JSON.stringify({ message: String(message).slice(0, 4096) }));
   }
 
   const argsEnvelope = JSON.parse(globalThis.__argsJson);
@@ -141,7 +160,9 @@ const BOOTSTRAP = String.raw`
   Object.defineProperties(globalThis, {
     agent: { value: requestAgent, writable: false, configurable: false },
     parallel: { value: parallel, writable: false, configurable: false },
+    pipeline: { value: pipeline, writable: false, configurable: false },
     phase: { value: phase, writable: false, configurable: false },
+    log: { value: log, writable: false, configurable: false },
     args: { value: args, writable: false, configurable: false },
     __workflowCheck: {
       value: Object.freeze(() => ({
@@ -213,8 +234,8 @@ function run(source, argsJson, runtimeConcurrency) {
     sandbox.__argsJson = argsJson;
     sandbox.__runtimeConcurrency = runtimeConcurrency;
     sandbox.__hostBridge = (kind, payloadJson) => {
-      if (kind === "phase") {
-        send({ kind: "phase", payloadJson });
+      if (kind === "phase" || kind === "log") {
+        send({ kind, payloadJson });
         return undefined;
       }
       if (kind !== "agent")
@@ -239,10 +260,10 @@ function run(source, argsJson, runtimeConcurrency) {
       filename: "workflow-bootstrap.js",
     }).runInContext(context, { timeout: 1000 });
     const wrapped = `
-      globalThis.__workflowPromise = (async function workflow(agent, parallel, phase, args) {
+      globalThis.__workflowPromise = (async function workflow(agent, parallel, pipeline, phase, log, args) {
         "use strict";
         ${source}
-      })(agent, parallel, phase, args).then(async (value) => {
+      })(agent, parallel, pipeline, phase, log, args).then(async (value) => {
         await Promise.resolve();
         const pending = __workflowCheck();
         if (pending.unconsumed > 0) {
